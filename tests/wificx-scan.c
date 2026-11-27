@@ -137,6 +137,21 @@ static void VerifyScanRoundTrip(const WDI_SCAN_PARAMETERS *Scan, const uint8_t *
     event[36] = 0x83;
     assert(Mt7922WdiScanEvent(&state, event, sizeof(event)));
     assert(!state.Active && !state.Cancelling && test.CompletionCount == 3);
+
+    SCAN_TEST c3Test = {0};
+    MT7922_WDI_SCAN c3State = {
+        .Transport = &c3Test, .Submit = TestSubmit, .Host = &c3Test, .Indicate = TestIndicate,
+        .Tlv = &tlv, .ChipId = 0x7925
+    };
+    assert(Mt7922StartWdiScan(&c3State, &header, Scan, 1, 2) == STATUS_SUCCESS);
+    const uint8_t c3Done[52] = {
+        sizeof(c3Done), 0, 0, 7U << 3, [36] = MT7925_SCAN_DONE_EVENT,
+        [48] = 0, [50] = 4
+    };
+    assert(!Mt7922WdiScanEvent(&c3State, c3Done, sizeof(c3Done) - 1));
+    assert(Mt7922WdiScanEvent(&c3State, c3Done, sizeof(c3Done)));
+    assert(!c3State.Active && c3Test.CompletionCount == 1 &&
+        c3Test.CompletionStatus == STATUS_SUCCESS);
 }
 
 static void VerifyStationCandidate(void)

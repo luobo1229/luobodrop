@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include "../src/station-scan.h"
 
 void VerifyWificxScan(void);
@@ -1892,9 +1893,10 @@ static void TestLinkReceive(void *context, const UCHAR *packet, ULONG length)
     ++sim.LinkReceived;
 }
 
-static ULONG TestLinkSend(void *context, UCHAR *packet, USHORT *rateCode)
+static ULONG TestLinkSend(void *context, UCHAR *packet, USHORT *rateCode, ULONGLONG *enqueuedAt)
 {
     *rateCode = 0;
+    *enqueuedAt = sim.Counter;
     assert(context == &sim && sim.LinkReady);
     if (sim.LinkSubmitted == LINK_PACKETS || (sim.LateDiscovery && !sim.RecoveryEchoReceived) ||
         (!sim.PublishService && sim.AddbaSeen < AWDL_ADDBA_MAX_RESPONSES)) {
@@ -1974,12 +1976,15 @@ static void VerifyImageScenarioWithOptions(SCENARIO scenario, NTSTATUS expected,
     sim.TransmitChannel = !sim.TransmitAwdl ? 0 :
         scenario == TRANSMIT_NO_REPORT ? 44 : scenario == TRANSMIT_RETRY ? 149 : 6;
     static const UCHAR targetPeer[MT7922_AWDL_PEER_BYTES] = {0x7e, 0, 0, 0, 0, 1};
-    MT7922_AWDL_LINK link = {&sim, TestLinkStopped, TestLinkReady, TestLinkReceive, TestLinkSend};
+    MT7922_AWDL_LINK link = {
+        .Context = &sim, .Stopped = TestLinkStopped, .Ready = TestLinkReady,
+        .Receive = TestLinkReceive, .TakeSend = TestLinkSend
+    };
     link.AnnounceMdns = receivingLink;
     link.AdvertiseVht = advertiseVht;
     link.ServiceLabel = receivingLink ? TestAirDropLabel : NULL;
     link.ReceivePort = 8771;
-    assert(Mt7922RunMcuProbe(sim.Registers, NULL, &retained, image, imageBytes,
+    assert(Mt7922RunMcuProbe(sim.Registers, 0x7922, NULL, &retained, image, imageBytes,
         receive, sim.TransmitChannel, wide80, wide80 && watch == NULL ? targetPeer : NULL,
         wide80 && watch == NULL && (!bridge || publishService) ? 8770 : 0,
         rateCode, bridge ? &link : NULL, watch, &result) == expected);
@@ -2447,8 +2452,8 @@ static void VerifyReceiveBaReordering(void)
     AWDL_SYNC_REF ref = {0};
     ref.Link = &link;
     ref.LinkOnline = TRUE;
-    ref.AddbaStartingSequence = 4095;
-    ref.AddbaParams = (16U << 6) | (5U << 2) | 2U;
+    ref.Addba.StartingSequence = 4095;
+    ref.Addba.Params = (16U << 6) | (5U << 2) | 2U;
     memcpy(ref.Peer, phone, sizeof(phone));
     MT7922_MCU_PROBE_INFO result = {0};
     memcpy(result.NicMac, station, sizeof(station));
@@ -2695,6 +2700,66 @@ static void VerifyStationScan(void)
     assert(!Mt7922IsScanDone(0x23, event, sizeof(event), 7, 1));
 }
 
+static void VerifyMt7925ScanBuilders(void)
+{
+    const MT7922_SCAN_SSID ssids[] = {{0, {0}}, {3, {'L', 'A', 'N'}}};
+    const MT7922_SCAN_CHANNEL channels[] = {{2, 36}, {2, 149}};
+    const uint8_t bssid[] = {2, 0x11, 0x22, 0x33, 0x44, 0x55};
+    const uint8_t ies[] = {0xdd, 1, 0xaa};
+    const MT7922_SCAN_PARAMETERS parameters = {
+        7, 1, 2, true, ssids, RTL_NUMBER_OF(ssids), channels, RTL_NUMBER_OF(channels),
+        ies, sizeof(ies), bssid, 40, 600
+    };
+    uint8_t connac2[MT7922_SCAN_REQUEST_BYTES];
+    assert(Mt7922BuildScanRequest(connac2, sizeof(connac2), &parameters));
+    const uint8_t randomMac[] = {2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee};
+    memcpy(connac2 + 1116, randomMac, sizeof(randomMac));
+
+    uint8_t unified[MT7925_SCAN_REQUEST_MAX_BYTES];
+    const size_t bytes = Mt7925BuildScanRequest(unified, sizeof(unified), connac2, sizeof(connac2));
+    assert(bytes == 567 && unified[0] == 0x87 && unified[1] == 2 &&
+        unified[2] == 0 && unified[3] == 0);
+    assert(unified[4] == 1 && unified[5] == 0 && unified[6] == 20 && unified[7] == 0 &&
+        unified[8] == 1 && unified[9] == 2 && unified[10] == 0x20 &&
+        unified[12] == 40 && unified[14] == 40 && unified[16] == 0x58 && unified[17] == 0x02);
+
+    const size_t ssid = 24;
+    assert(unified[ssid] == 10 && unified[ssid + 1] == 0 &&
+        unified[ssid + 2] == 0x70 && unified[ssid + 3] == 1 &&
+        unified[ssid + 4] == 4 && unified[ssid + 5] == 1 &&
+        unified[ssid + 8] == 3 && unified[ssid + 12] == 'L' &&
+        unified[ssid + 13] == 'A' && unified[ssid + 14] == 'N');
+    const size_t bssidTlv = ssid + 368;
+    assert(unified[bssidTlv] == 11 && unified[bssidTlv + 1] == 0 &&
+        unified[bssidTlv + 2] == 16 && unified[bssidTlv + 3] == 0 &&
+        memcmp(unified + bssidTlv + 4, bssid, sizeof(bssid)) == 0);
+    const size_t channelTlv = bssidTlv + 16;
+    assert(unified[channelTlv] == 12 && unified[channelTlv + 1] == 0 &&
+        unified[channelTlv + 2] == 136 && unified[channelTlv + 3] == 0 &&
+        unified[channelTlv + 4] == 4 && unified[channelTlv + 5] == 2 &&
+        unified[channelTlv + 8] == 2 && unified[channelTlv + 9] == 36 &&
+        unified[channelTlv + 10] == 2 && unified[channelTlv + 11] == 149);
+    const size_t miscTlv = channelTlv + 136;
+    assert(unified[miscTlv] == 14 && unified[miscTlv + 1] == 0 &&
+        unified[miscTlv + 2] == 12 && unified[miscTlv + 3] == 0 &&
+        memcmp(unified + miscTlv + 4, randomMac, sizeof(randomMac)) == 0);
+    const size_t ieTlv = miscTlv + 12;
+    assert(unified[ieTlv] == 13 && unified[ieTlv + 1] == 0 &&
+        unified[ieTlv + 2] == 11 && unified[ieTlv + 3] == 0 &&
+        unified[ieTlv + 4] == 3 && unified[ieTlv + 6] == 2 &&
+        memcmp(unified + ieTlv + 8, ies, sizeof(ies)) == 0);
+    assert(Mt7925BuildScanRequest(unified, bytes - 1, connac2, sizeof(connac2)) == 0);
+    connac2[160] = 1; /* MT7925 scan requests in this profile are 5 GHz only. */
+    assert(Mt7925BuildScanRequest(unified, sizeof(unified), connac2, sizeof(connac2)) == 0);
+
+    uint8_t cancel[MT7925_SCAN_CANCEL_BYTES];
+    assert(Mt7925BuildScanCancel(cancel, sizeof(cancel), 0x87, 2) == sizeof(cancel));
+    assert(cancel[0] == 0x87 && cancel[1] == 2 && cancel[2] == 0 && cancel[3] == 0 &&
+        cancel[4] == 2 && cancel[5] == 0 && cancel[6] == 8 && cancel[7] == 0 &&
+        cancel[8] == 0 && cancel[9] == 0 && cancel[10] == 0 && cancel[11] == 0);
+    assert(Mt7925BuildScanCancel(cancel, sizeof(cancel) - 1, 0x87, 2) == 0);
+}
+
 static void VerifyStationObserverBuilders(void)
 {
     uint8_t enable[MT7922_OBSERVER_ENABLE_BYTES];
@@ -2729,24 +2794,61 @@ static void VerifyStationObserverBuilders(void)
     assert(!observer.Running);
 }
 
+static void VerifyMt7925StationRadioBuilders(void)
+{
+    static const uint8_t channels[] = {36, 40, 44, 48, 149, 153, 157, 161, 165};
+    MT7922_STATION_RADIO_PROFILE profile = {
+        .Country = {'C', 'N'}, .ChannelCount = (uint8_t)RTL_NUMBER_OF(channels)
+    };
+    for (size_t i = 0; i < RTL_NUMBER_OF(channels); ++i) {
+        profile.Channels[i] = (MT7922_STATION_RADIO_CHANNEL){channels[i], 40};
+    }
+
+    uint8_t domain[MT7925_STATION_DOMAIN_HEADER + MT7925_STATION_DOMAIN_ENTRY * MT7922_STATION_RADIO_CHANNELS];
+    assert(Mt7925BuildStationDomain(domain, &profile) == 88);
+    assert(domain[0] == 'C' && domain[1] == 'N' && domain[4] == 0 && domain[5] == 2 && domain[6] == 0);
+    assert(domain[8] == 2 && domain[9] == 0 && domain[10] == 80 && domain[11] == 0);
+    assert(domain[12] == 0 && domain[13] == (uint8_t)RTL_NUMBER_OF(channels) && domain[14] == 0);
+    for (size_t i = 0; i < RTL_NUMBER_OF(channels); ++i) {
+        const size_t offset = MT7925_STATION_DOMAIN_HEADER + MT7925_STATION_DOMAIN_ENTRY * i;
+        assert(domain[offset] == channels[i] && domain[offset + 1] == 0);
+        for (size_t j = 2; j < MT7925_STATION_DOMAIN_ENTRY; ++j) {
+            assert(domain[offset + j] == 0);
+        }
+    }
+    assert(Mt7925BuildStationDomain(NULL, &profile) == 0);
+
+    uint8_t power[MT7925_STATION_POWER_BYTES];
+    assert(Mt7925BuildStationPower(power, &profile, 0) == MT7925_STATION_POWER_BYTES);
+    assert(power[4] == 1 && power[6] == 0x76 && power[7] == 0x05);
+    assert(power[12] == 3 && power[13] == 2 && power[14] == 0 &&
+        power[16] == 'C' && power[17] == 'N');
+    assert(power[MT7925_STATION_POWER_HEADER] == 36 && power[MT7925_STATION_POWER_HEADER + 1] == 40);
+    assert(power[MT7925_STATION_POWER_HEADER + MT7925_STATION_POWER_ENTRY] == 40 &&
+        power[MT7925_STATION_POWER_HEADER + MT7925_STATION_POWER_ENTRY + 1] == 40);
+    assert(Mt7925BuildStationPower(power, &profile, 6) == MT7925_STATION_POWER_BYTES &&
+        power[12] == 3 && power[14] == 1 &&
+        power[MT7925_STATION_POWER_HEADER] == 157 &&
+        power[MT7925_STATION_POWER_HEADER + 2U * MT7925_STATION_POWER_ENTRY] == 165);
+    assert(Mt7925BuildStationPower(power, &profile, RTL_NUMBER_OF(channels)) == 0);
+}
+
 static void VerifyVhtRxStats(void)
 {
     MT7922_AWDL_LINK link = {0};
-    AWDL_SYNC_REF ref = {0};
-    ref.Link = &link;
     MT7922_RX_FRAME frame = {0};
-    CountPeerRxRadio(&ref, &frame);
+    CountPeerRxRadio(&link, &frame);
     frame.PhyPresent = 1;
     frame.PhyMode = 4;
     frame.PhyWidth = 2;
     frame.Ampdu = 1;
-    CountPeerRxRadio(&ref, &frame);
-    CountPeerRxRadio(&ref, &frame);
+    CountPeerRxRadio(&link, &frame);
+    CountPeerRxRadio(&link, &frame);
     frame.AmpduTimestamp = 123;
-    CountPeerRxRadio(&ref, &frame);
+    CountPeerRxRadio(&link, &frame);
     frame.PhyMode = 2;
     frame.Ampdu = 0;
-    CountPeerRxRadio(&ref, &frame);
+    CountPeerRxRadio(&link, &frame);
     assert(link.RxPhyVht == 3 && link.RxPhyVht80 == 3 && link.RxPhyHt == 1 && link.RxPhyUnknown == 1);
     assert(link.RxAmpduFrames == 3 && link.RxAmpduBursts == 2 && link.RxAmpduMax == 2);
 }
@@ -2963,7 +3065,8 @@ static void VerifyStationClcBoot(const UCHAR *Image, SIZE_T Bytes, bool MissingR
     }
 
     MT7922_MCU_STATION station = {0};
-    const NTSTATUS status = Mt7922McuStartStation(&station, sim.Registers, &sim, Image, Bytes,
+    const NTSTATUS status = Mt7922McuStartStation(&station, sim.Registers, MT7922_CHIP_ID,
+        &sim, Image, Bytes,
         19, &radio, clc, pos);
     assert(sim.EepromReads == 1);
     if (MissingRule) {
@@ -2988,8 +3091,9 @@ static void TestSharedLinkReceive(void *context, const UCHAR *packet, ULONG leng
     ++sim.LinkReceived;
 }
 
-static ULONG TestSharedLinkTakeSend(void *context, UCHAR *packet, USHORT *rate)
+static ULONG TestSharedLinkTakeSend(void *context, UCHAR *packet, USHORT *rate, ULONGLONG *enqueuedAt)
 {
+    *enqueuedAt = sim.Counter;
     assert(context == &sim && sim.LinkReady && *rate == 0);
     static const UCHAR local[6] = {2, 0x44, 0x33, 0x22, 0x11, 1};
     static const UCHAR peer[6] = {0x7e, 0, 0, 0, 0, 1};
@@ -3052,13 +3156,16 @@ static void VerifyStationLifecycle(const UCHAR *Image, SIZE_T Bytes,
             {149, 20}, {153, 20}, {157, 20}, {161, 20}, {165, 20}}
     };
     MT7922_MCU_STATION station = {0};
-    assert(Mt7922McuStartStation(&station, sim.Registers, &sim, Image, Bytes, 19, NULL, NULL, 0) == STATUS_INVALID_PARAMETER);
+    assert(Mt7922McuStartStation(&station, sim.Registers, MT7922_CHIP_ID,
+        &sim, Image, Bytes, 19, NULL, NULL, 0) == STATUS_INVALID_PARAMETER);
     MT7922_STATION_RADIO_PROFILE invalid = radio;
     invalid.Channels[4].Number = 52;
-    assert(Mt7922McuStartStation(&station, sim.Registers, &sim, Image, Bytes, 19, &invalid, NULL, 0) == STATUS_INVALID_PARAMETER);
+    assert(Mt7922McuStartStation(&station, sim.Registers, MT7922_CHIP_ID,
+        &sim, Image, Bytes, 19, &invalid, NULL, 0) == STATUS_INVALID_PARAMETER);
     assert(sim.DmaEnables == 0);
     sim.RejectStationPse = RejectPse;
-    assert(Mt7922McuStartStation(&station, sim.Registers, &sim, Image, Bytes, 19, &radio, NULL, 0) ==
+    assert(Mt7922McuStartStation(&station, sim.Registers, MT7922_CHIP_ID,
+        &sim, Image, Bytes, 19, &radio, NULL, 0) ==
         ((RejectPort || RejectPse) ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_SUCCESS));
     assert(sim.DmaEnables == 1 && sim.ResetCount == 1 &&
         sim.StationBssWrites == (RejectPse ? 0U : 1U) && sim.StationRadioBatches == (RejectPse ? 1U : 2U));
@@ -3069,7 +3176,8 @@ static void VerifyStationLifecycle(const UCHAR *Image, SIZE_T Bytes,
     }
     assert(station.Ready && station.Scan.Rings != NULL && sim.CommonBuffer != NULL);
     assert(!sim.SnifferEnabled && ReadStored(TX_ACTION_RING + RING_COUNT) == TX_ACTION_COUNT);
-    assert(Mt7922McuStartStation(&station, sim.Registers, &sim, Image, Bytes, 19, &radio, NULL, 0) == STATUS_DEVICE_BUSY);
+    assert(Mt7922McuStartStation(&station, sim.Registers, MT7922_CHIP_ID,
+        &sim, Image, Bytes, 19, &radio, NULL, 0) == STATUS_DEVICE_BUSY);
 
     const MT7922_STATION_AP ap = {
         .Bssid = {2, 0x21, 0x22, 0x23, 0x24, 0x25}, .Channel = 149, .Band = 2,
@@ -3230,9 +3338,9 @@ static void VerifyStationLifecycle(const UCHAR *Image, SIZE_T Bytes,
     assert(station.KeyStateInvalid == RejectGroupKey && station.GroupKeyInstalled != RejectGroupKey);
     assert(sim.StationKeyCommands == 2);
     assert(station.ConnectDebug.Data.TxReleaseDuringCommand == 1);
-    assert(sim.StationPortSecureCommands == !RejectGroupKey);
-    assert(station.FirmwarePortSecured == !RejectGroupKey &&
-        station.ConnectDebug.Data.PortSecured == !RejectGroupKey);
+    assert((BOOLEAN)(sim.StationPortSecureCommands != 0) == (BOOLEAN)!RejectGroupKey);
+    assert(station.FirmwarePortSecured == (BOOLEAN)!RejectGroupKey &&
+        station.ConnectDebug.Data.PortSecured == (ULONG)!RejectGroupKey);
     if (!RejectGroupKey) {
         assert(Mt7922McuSendStationData(&station, arp, sizeof(arp), Mt7922PrivacyRequireKey) == STATUS_SUCCESS);
         assert(sim.StationArpSent == 1);
@@ -3500,20 +3608,32 @@ static void VerifyStationLifecycle(const UCHAR *Image, SIZE_T Bytes,
     free(sim.Registers);
 }
 
-int wmain(int argc, wchar_t **argv)
+static void VerifyUnitTests(void)
 {
-    assert(argc == 3);
     VerifyAdvertTiming();
     VerifyUploadReplyTiming();
     VerifyReceiveBaReordering();
     VerifyVhtRxStats();
     VerifyStationScan();
+    VerifyMt7925ScanBuilders();
     VerifyStationObserverBuilders();
+    VerifyMt7925StationRadioBuilders();
     VerifyStationClcSelection();
     VerifyWificxScan();
     VerifyWificxNetRings();
     VerifyFastAckReport();
     VerifyPeerSelection();
+}
+
+int wmain(int argc, wchar_t **argv)
+{
+    if (argc == 2 && wcscmp(argv[1], L"--unit-only") == 0) {
+        VerifyUnitTests();
+        puts("Firmware-independent MCU, scan, WiFiCx, and ring checks passed.");
+        return 0;
+    }
+    assert(argc == 3);
+    VerifyUnitTests();
     PUCHAR image = ReadImage(argv[1], MT7922_FACTORY_IMAGE_BYTES);
     PUCHAR reference = ReadImage(argv[2], MT7922_REFERENCE_IMAGE_BYTES);
 

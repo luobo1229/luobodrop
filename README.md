@@ -1,5 +1,7 @@
 # LuoboDrop
 
+> **Experimental MT7925 port:** This source includes an MT7925 adaptation, but only compilation and firmware-independent checks have passed. Windows rejected the local test-signing certificate, so the driver has not been loaded or validated on MT7925 hardware. It is not a usable driver release. The tested setup and benchmark below refer to the original MT7922 development build, not this port. The source package excludes driver binaries, test certificates, and firmware images.
+
 LuoboDrop is an experimental Windows 11 project for exchanging files with an iPad through native AirDrop while the Windows PC remains associated with a Wi-Fi access point. It uses a custom WiFiCx driver for a single MediaTek MT7922 adapter, an Apple Wireless Direct Link (AWDL) implementation, and a Windows desktop panel.
 
 ## Community source preview

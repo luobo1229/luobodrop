@@ -15,7 +15,11 @@ typedef struct {
     struct _MCU_RINGS *Rings;
     MT7922_MCU_PROBE_INFO *Result;
     const MT7922_STATION_RADIO_PROFILE *Radio;
+    uint16_t ChipId;
     bool Associated;
+    uint8_t ScanSequence;
+    uint8_t ScanBssIndex;
+    bool ScanActive;
 } MT7922_MCU_SCAN_TRANSPORT;
 
 /* Counts only. Handshake payloads and key material are never recorded here. */
@@ -249,10 +253,9 @@ typedef void (*MT7922_STATION_RECEIVE)(void *Context, const uint8_t *Record, siz
    The device must be exclusively owned by the caller. After a failed stop,
    retry before releasing the DMA enabler or BAR mapping. */
 /* Clc is the firmware CLC region (mt7922-wificx-clc.bin). A null CLC skips
-   SET_CLC; the station then relies on firmware defaults, as mt76 does when no
-   country is known. */
+   SET_CLC when the selected firmware image has no separate CLC region. */
 NTSTATUS Mt7922McuStartStation(MT7922_MCU_STATION *Station, PUCHAR Window,
-    WDFDMAENABLER DmaEnabler, const UCHAR *Image, SIZE_T ImageBytes, uint16_t MulticastWcid,
+    ULONG ChipId, WDFDMAENABLER DmaEnabler, const UCHAR *Image, SIZE_T ImageBytes, uint16_t MulticastWcid,
     const MT7922_STATION_RADIO_PROFILE *Profile, const UCHAR *Clc, SIZE_T ClcBytes);
 NTSTATUS Mt7922McuStopStation(MT7922_MCU_STATION *Station);
 NTSTATUS Mt7922McuDisableStationMac(MT7922_MCU_STATION *Station);
@@ -460,7 +463,7 @@ typedef struct _MT7922_AWDL_WATCH {
     MT7922_AWDL_WATCH_INFO Info;
 } MT7922_AWDL_WATCH;
 
-NTSTATUS Mt7922RunMcuProbe(PUCHAR Window, WDFDMAENABLER DmaEnabler,
+NTSTATUS Mt7922RunMcuProbe(PUCHAR Window, ULONG ChipId, WDFDMAENABLER DmaEnabler,
     WDFCOMMONBUFFER *RetainedBuffer, const UCHAR *Image, SIZE_T ImageBytes,
     BOOLEAN ReceiveAwdl, UCHAR TransmitChannel, BOOLEAN Wide80, const UCHAR *TargetPeer, USHORT TcpPort, USHORT RateCode,
     MT7922_AWDL_LINK *Link, MT7922_AWDL_WATCH *Watch, MT7922_MCU_PROBE_INFO *Result);

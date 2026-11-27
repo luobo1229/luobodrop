@@ -101,5 +101,9 @@ typedef struct _AWDL_ACTION {
    On success, AmsduPart is the hardware payload format (zero for a standalone frame). */
 MT7922_RX_STATUS Mt7922DecodeRx(const uint8_t *Buffer, size_t DmaBytes,
     MT7922_RX_FRAME *Frame);
+MT7922_RX_STATUS Mt7925DecodeRx(const uint8_t *Buffer, size_t DmaBytes,
+    MT7922_RX_FRAME *Frame);
+MT7922_RX_STATUS Mt792xDecodeRx(uint16_t ChipId, const uint8_t *Buffer,
+    size_t DmaBytes, MT7922_RX_FRAME *Frame);
 AWDL_ACTION_KIND AwdlDecodeAction(const uint8_t *Bytes, size_t Length,
     AWDL_ACTION *Action);

@@ -29,6 +29,7 @@ typedef struct {
 
 typedef struct {
     WDFDEVICE Device;
+    ULONG ChipId;
     WDFWORKITEM Worker;
     WDFTIMER Timer;
     WDFTIMER FastPollTimer;
@@ -201,7 +202,11 @@ static NTSTATUS OpenStationPackageFile(const WCHAR *FileName, HANDLE *File)
 static NTSTATUS LoadStationFirmware(STATION_DEVICE *State)
 {
     HANDLE file;
-    NTSTATUS status = OpenStationPackageFile(L"mt7922-wificx-fw.bin", &file);
+    const bool mt7925 = State->ChipId == MT7925_CHIP_ID;
+    const ULONG firmwareBytes = mt7925
+        ? MT7925_REFERENCE_IMAGE_BYTES : MT7922_REFERENCE_IMAGE_BYTES;
+    NTSTATUS status = OpenStationPackageFile(mt7925
+        ? L"mt7925-wificx-fw.bin" : L"mt7922-wificx-fw.bin", &file);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -209,7 +214,7 @@ static NTSTATUS LoadStationFirmware(STATION_DEVICE *State)
     IO_STATUS_BLOCK io;
     FILE_STANDARD_INFORMATION information;
     status = ZwQueryInformationFile(file, &io, &information, sizeof(information), FileStandardInformation);
-    if (NT_SUCCESS(status) && information.EndOfFile.QuadPart != MT7922_REFERENCE_IMAGE_BYTES) {
+    if (NT_SUCCESS(status) && information.EndOfFile.QuadPart != firmwareBytes) {
         status = STATUS_INVALID_IMAGE_FORMAT;
     }
     if (NT_SUCCESS(status)) {
@@ -218,10 +223,10 @@ static NTSTATUS LoadStationFirmware(STATION_DEVICE *State)
         attributes.ParentObject = State->Device;
         void *buffer;
         status = WdfMemoryCreate(&attributes, NonPagedPoolNx, 'FctM',
-            MT7922_REFERENCE_IMAGE_BYTES, &State->Firmware, &buffer);
+            firmwareBytes, &State->Firmware, &buffer);
         if (NT_SUCCESS(status)) {
-            status = ZwReadFile(file, NULL, NULL, NULL, &io, buffer, MT7922_REFERENCE_IMAGE_BYTES, NULL, NULL);
-            if (NT_SUCCESS(status) && io.Information != MT7922_REFERENCE_IMAGE_BYTES) {
+            status = ZwReadFile(file, NULL, NULL, NULL, &io, buffer, firmwareBytes, NULL, NULL);
+            if (NT_SUCCESS(status) && io.Information != firmwareBytes) {
                 status = STATUS_END_OF_FILE;
             }
         }
@@ -232,6 +237,10 @@ static NTSTATUS LoadStationFirmware(STATION_DEVICE *State)
 
 static NTSTATUS LoadStationClc(STATION_DEVICE *State)
 {
+    if (State->ChipId == MT7925_CHIP_ID) {
+        /* The backed-up MT7925 RAM image has no CLC region. */
+        return STATUS_SUCCESS;
+    }
     HANDLE file;
     NTSTATUS status = OpenStationPackageFile(L"mt7922-wificx-clc.bin", &file);
     if (!NT_SUCCESS(status)) {
@@ -280,9 +289,14 @@ static NTSTATUS LoadStationClc(STATION_DEVICE *State)
     return status;
 }
 
-NTSTATUS Mt7922WifiPrepareDevice(WDFDEVICE Device, PUCHAR Bar, WDFDMAENABLER Dma)
+NTSTATUS Mt7922WifiPrepareDevice(WDFDEVICE Device, PUCHAR Bar, WDFDMAENABLER Dma,
+    ULONG ChipId)
 {
     STATION_DEVICE *state = GetStationDevice(Device);
+    if (ChipId != MT7922_CHIP_ID && ChipId != MT7925_CHIP_ID) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    state->ChipId = ChipId;
     WDFKEY key;
     NTSTATUS status = WdfDeviceOpenRegistryKey(Device, PLUGPLAY_REGKEY_DRIVER, KEY_QUERY_VALUE,
         WDF_NO_OBJECT_ATTRIBUTES, &key);
@@ -333,7 +347,7 @@ static NTSTATUS StartStationRadio(STATION_DEVICE *State)
     size_t clcBytes = 0;
     const UCHAR *image = WdfMemoryGetBuffer(State->Firmware, &bytes);
     const UCHAR *clc = State->Clc != NULL ? WdfMemoryGetBuffer(State->Clc, &clcBytes) : NULL;
-    NTSTATUS status = Mt7922McuStartStation(&State->Station, State->Bar, State->Dma,
+    NTSTATUS status = Mt7922McuStartStation(&State->Station, State->Bar, State->ChipId, State->Dma,
         image, bytes, STATION_GROUP_WCID, &State->Profile, clc, clcBytes);
     Mt7922TraceStationControl("McuStart", 0, 0, 0, status, 0,
         State->Station.Info.CleanupStatus);

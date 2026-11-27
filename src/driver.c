@@ -42,6 +42,7 @@ static EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL SharedIoControl;
 
 /* MT7921-family map at PCI BAR0, documented by mt76/mt7921/regs.h and mt792x_regs.h. */
 #define MT7922_BAR0_MIN_BYTES   0x100000
+#define MT7925_BAR0_MIN_BYTES   0x155028
 #define MT7922_HIF_REMAP_L1    0x0fe24c
 #define MT7922_HIF_L1_WINDOW   0x040000
 #define MT7922_TOP_ID_BANK     0x7001
@@ -51,6 +52,9 @@ static EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL SharedIoControl;
 #define MT7922_CONN_ON_BANK    0x7c06
 #define MT7922_OWNERSHIP       (MT7922_HIF_L1_WINDOW + 0x0010)
 #define MT7922_FIRMWARE_MISC   (MT7922_HIF_L1_WINDOW + 0x00f0)
+#define MT7925_CONN_ON_WINDOW  0x0e0000
+#define MT7925_OWNERSHIP       (MT7925_CONN_ON_WINDOW + 0x0010)
+#define MT7925_FIRMWARE_MISC   (MT7925_CONN_ON_WINDOW + 0x00f0)
 #define MT7922_WFDMA_CONFIG    0x0d4208
 #define MT7922_REQUEST_FW_OWN  0x1
 #define MT7922_REQUEST_DRV_OWN 0x2
@@ -220,7 +224,8 @@ NTSTATUS Mt7922DeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
 static NTSTATUS Mt7922Identify(WDFDEVICE Device, MT7922_PROBE_INFO *Info)
 {
 #ifdef MT7922_USER_MODE
-    static const WCHAR target[] = L"PCI\\VEN_14C3&DEV_0616&SUBSYS_E0DF105B&REV_00";
+    static const WCHAR target7922[] = L"PCI\\VEN_14C3&DEV_0616&SUBSYS_E0DF105B&REV_00";
+    static const WCHAR target7925[] = L"PCI\\VEN_14C3&DEV_7925&SUBSYS_60001A3B&REV_00";
     WDFMEMORY memory;
     NTSTATUS status = WdfDeviceAllocAndQueryProperty(Device, DevicePropertyHardwareID,
         NonPagedPoolNx, WDF_NO_OBJECT_ATTRIBUTES, &memory);
@@ -230,19 +235,23 @@ static NTSTATUS Mt7922Identify(WDFDEVICE Device, MT7922_PROBE_INFO *Info)
 
     size_t size;
     const WCHAR *ids = WdfMemoryGetBuffer(memory, &size);
-    const int length = ARRAYSIZE(target) - 1;
-    BOOL matches = size >= sizeof(target) && ids[length] == L'\0' &&
-        CompareStringOrdinal(ids, length, target, length, TRUE) == CSTR_EQUAL;
+    const int length7922 = ARRAYSIZE(target7922) - 1;
+    const int length7925 = ARRAYSIZE(target7925) - 1;
+    BOOL matches7922 = size >= sizeof(target7922) && ids[length7922] == L'\0' &&
+        CompareStringOrdinal(ids, length7922, target7922, length7922, TRUE) == CSTR_EQUAL;
+    BOOL matches7925 = size >= sizeof(target7925) && ids[length7925] == L'\0' &&
+        CompareStringOrdinal(ids, length7925, target7925, length7925, TRUE) == CSTR_EQUAL;
     WdfObjectDelete(memory);
-    if (!matches) {
+    if (!matches7922 && !matches7925) {
         return STATUS_NO_SUCH_DEVICE;
     }
 
     Info->VendorId = MT7922_PCI_VENDOR;
-    Info->DeviceId = MT7922_PCI_DEVICE;
+    Info->DeviceId = matches7925 ? MT7925_PCI_DEVICE : MT7922_PCI_DEVICE;
+    Info->ChipRevision = 0;
 #else
     BUS_INTERFACE_STANDARD bus;
-    ULONG pciHeader[2];
+    ULONG pciHeader[3];
     NTSTATUS status = WdfFdoQueryForInterface(Device, &GUID_BUS_INTERFACE_STANDARD,
         (PINTERFACE)&bus, sizeof(bus), 1, NULL);
     if (!NT_SUCCESS(status)) {
@@ -256,14 +265,19 @@ static NTSTATUS Mt7922Identify(WDFDEVICE Device, MT7922_PROBE_INFO *Info)
         return STATUS_IO_DEVICE_ERROR;
     }
     ULONG pciId = pciHeader[0];
-    if ((pciId & 0xffff) != MT7922_PCI_VENDOR || (pciId >> 16) != MT7922_PCI_DEVICE) {
+    const ULONG deviceId = pciId >> 16;
+    if ((pciId & 0xffff) != MT7922_PCI_VENDOR ||
+        (deviceId != MT7922_PCI_DEVICE && deviceId != MT7925_PCI_DEVICE)) {
         return STATUS_NO_SUCH_DEVICE;
     }
 
     Info->VendorId = pciId & 0xffff;
-    Info->DeviceId = pciId >> 16;
+    Info->DeviceId = deviceId;
     Info->PciCommand = pciHeader[1] & 0xffff;
+    Info->ChipRevision = pciHeader[2] & 0xff;
 #endif
+    Info->ChipId = Info->DeviceId == MT7925_PCI_DEVICE
+        ? MT7925_CHIP_ID : MT7922_CHIP_ID;
     return STATUS_SUCCESS;
 }
 
@@ -328,8 +342,10 @@ NTSTATUS Mt7922PrepareHardware(
         }
         switch (resource->Type) {
         case CmResourceTypeMemory:
+            const ULONG minimumBarBytes = info->ChipId == MT7925_CHIP_ID
+                ? MT7925_BAR0_MIN_BYTES : MT7922_BAR0_MIN_BYTES;
             if (info->MemoryRangeCount == 0 &&
-                resource->u.Memory.Length >= MT7922_BAR0_MIN_BYTES) {
+                resource->u.Memory.Length >= minimumBarBytes) {
                 PVOID window = NULL;
 #ifdef MT7922_USER_MODE
                 status = WdfDeviceMapIoSpace(Device, resource->u.Memory.Start,
@@ -363,7 +379,8 @@ NTSTATUS Mt7922PrepareHardware(
     if (context->RegisterWindow == NULL || info->DmaBufferStatus != (ULONG)STATUS_SUCCESS) {
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
-    return Mt7922WifiPrepareDevice(Device, context->RegisterWindow, context->DmaEnabler);
+    return Mt7922WifiPrepareDevice(Device, context->RegisterWindow, context->DmaEnabler,
+        info->ChipId);
 #else
     return STATUS_SUCCESS;
 #endif
@@ -480,9 +497,14 @@ static NTSTATUS Mt7922WaitForOwner(WDFDEVICE Device, PULONG Register,
 /* Request ownership with the PCIe LPCTL command and restore its original owner.
  * Register offsets and ownership bits follow mt76/mt792x_regs.h and mt792x_core.c.
  */
-static NTSTATUS Mt7922ProbeFirmware(WDFDEVICE Device, PUCHAR Window, MT7922_PROBE_INFO *Info)
+static NTSTATUS Mt7922ProbeFirmware(WDFDEVICE Device, PUCHAR Window, ULONG ChipId,
+    MT7922_PROBE_INFO *Info)
 {
-    PULONG ownership = (PULONG)(Window + MT7922_OWNERSHIP);
+    const ULONG ownershipOffset = ChipId == MT7925_CHIP_ID
+        ? MT7925_OWNERSHIP : MT7922_OWNERSHIP;
+    const ULONG firmwareOffset = ChipId == MT7925_CHIP_ID
+        ? MT7925_FIRMWARE_MISC : MT7922_FIRMWARE_MISC;
+    PULONG ownership = (PULONG)(Window + ownershipOffset);
     Info->OwnershipBefore = Mt7922ReadRegister(Device, ownership);
     if (Info->OwnershipBefore == ULONG_MAX) {
         return STATUS_DEVICE_NOT_READY;
@@ -492,7 +514,7 @@ static NTSTATUS Mt7922ProbeFirmware(WDFDEVICE Device, PUCHAR Window, MT7922_PROB
     Mt7922WriteRegister(Device, ownership, MT7922_REQUEST_DRV_OWN);
     NTSTATUS status = Mt7922WaitForOwner(Device, ownership, 0, &Info->OwnershipWhileProbing);
     if (NT_SUCCESS(status)) {
-        Info->FirmwareState = Mt7922ReadRegister(Device, (PULONG)(Window + MT7922_FIRMWARE_MISC));
+        Info->FirmwareState = Mt7922ReadRegister(Device, (PULONG)(Window + firmwareOffset));
         Info->DmaConfig = Mt7922ReadRegister(Device, (PULONG)(Window + MT7922_WFDMA_CONFIG));
         if (Info->FirmwareState == ULONG_MAX || Info->DmaConfig == ULONG_MAX) {
             status = STATUS_DEVICE_NOT_READY;
@@ -534,6 +556,18 @@ NTSTATUS Mt7922D0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
         return STATUS_SUCCESS;
     }
 
+    if (info->DeviceId == MT7925_PCI_DEVICE) {
+        BOOLEAN identified = info->ChipId == MT7925_CHIP_ID &&
+            info->ChipRevision != ULONG_MAX;
+        if (identified) {
+            info->FirmwareProbeStatus = (ULONG)Mt7922ProbeFirmware(Device, window,
+                MT7925_CHIP_ID, info);
+        }
+        info->RegisterStatus = identified
+            ? (ULONG)STATUS_SUCCESS : (ULONG)STATUS_DEVICE_DATA_ERROR;
+        return STATUS_SUCCESS;
+    }
+
     PULONG remap = (PULONG)(window + MT7922_HIF_REMAP_L1);
     ULONG savedMap = Mt7922ReadRegister(Device, remap);
     if (savedMap == ULONG_MAX) {
@@ -548,9 +582,10 @@ NTSTATUS Mt7922D0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
             (PULONG)(window + MT7922_HIF_L1_WINDOW + MT7922_TOP_REV_OFFSET));
     }
 
-    BOOLEAN identified = info->ChipId == 0x7922 && info->ChipRevision != ULONG_MAX;
+    BOOLEAN identified = info->ChipId == MT7922_CHIP_ID && info->ChipRevision != ULONG_MAX;
     if (identified && Mt7922SelectBank(Device, remap, savedMap, MT7922_CONN_ON_BANK)) {
-        info->FirmwareProbeStatus = (ULONG)Mt7922ProbeFirmware(Device, window, info);
+        info->FirmwareProbeStatus = (ULONG)Mt7922ProbeFirmware(Device, window,
+            MT7922_CHIP_ID, info);
     }
 
     Mt7922WriteRegister(Device, remap, savedMap);
@@ -1550,7 +1585,7 @@ static void HandleMcuProbe(WDFDEVICE Device, WDFREQUEST Request, ULONG Operation
             WdfSpinLockRelease(context->LinkLock);
         }
         const USHORT peerPort = receiveWarmup ? MT7922_AWDL_RECEIVER_PEER_PORT : receiveLink ? 0 : tcpPort;
-        status = Mt7922RunMcuProbe(context->RegisterWindow, context->DmaEnabler,
+        status = Mt7922RunMcuProbe(context->RegisterWindow, info->ChipId, context->DmaEnabler,
             &context->RetainedMcuBuffer, image, imageBytes,
             Operation == IOCTL_MT7922_RECEIVE_AWDL || transmitChannel != 0 || watchPair,
             transmitChannel, wideTransmit || watchPair, targetPeer, peerPort, rateCode,

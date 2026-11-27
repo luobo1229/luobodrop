@@ -50,7 +50,8 @@ static bool DeliverScanFrame(void *Context, const uint8_t *Record, size_t Bytes)
 NTSTATUS Mt7922BindWificxScan(MT7922_WDI_SCAN *Scan, WDFDEVICE Device,
     MT7922_MCU_STATION *Station, const TLV_CONTEXT *Tlv)
 {
-    if (!Station->Ready || Station->Scan.Radio == NULL || Device == NULL || Tlv == NULL) {
+    if (!Station->Ready || Station->Scan.Radio == NULL || Station->Scan.Rings == NULL ||
+        Device == NULL || Tlv == NULL) {
         return STATUS_DEVICE_NOT_READY;
     }
     *Scan = (MT7922_WDI_SCAN){
@@ -58,7 +59,8 @@ NTSTATUS Mt7922BindWificxScan(MT7922_WDI_SCAN *Scan, WDFDEVICE Device,
         .Submit = Mt7922McuSubmitStationScan,
         .Host = Device,
         .Indicate = PublishScanIndication,
-        .Tlv = Tlv
+        .Tlv = Tlv,
+        .ChipId = Station->Scan.ChipId
     };
     Mt7922McuSetScanReceiver(Station->Scan.Rings, Scan, DeliverScanEvent, DeliverScanFrame);
     return STATUS_SUCCESS;

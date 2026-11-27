@@ -310,6 +310,55 @@ size_t Mt7922BuildStationDomain(uint8_t *Command, const MT7922_STATION_RADIO_PRO
     return bytes;
 }
 
+size_t Mt7925BuildStationDomain(uint8_t *Command, const MT7922_STATION_RADIO_PROFILE *Profile)
+{
+    /* Connac3 SET_DOMAIN_INFO: four-byte country header followed by a channel TLV. */
+    if (Command == NULL || !Mt7922ValidateStationRadio(Profile)) {
+        return 0;
+    }
+    const size_t tlvBytes = 8U + MT7925_STATION_DOMAIN_ENTRY * Profile->ChannelCount;
+    const size_t bytes = MT7925_STATION_DOMAIN_HEADER + MT7925_STATION_DOMAIN_ENTRY * Profile->ChannelCount;
+    memset(Command, 0, bytes);
+    memcpy(Command, Profile->Country, sizeof(Profile->Country));
+    Command[5] = 2; /* Advertise only 20/40/80 MHz, the station path implemented here. */
+    Command[8] = 2; /* UNI_DOMAIN_INFO_CHANNEL TLV. */
+    Command[10] = (uint8_t)tlvBytes;
+    Command[11] = (uint8_t)(tlvBytes >> 8);
+    Command[13] = Profile->ChannelCount;
+    for (size_t i = 0; i < Profile->ChannelCount; ++i) {
+        const size_t offset = MT7925_STATION_DOMAIN_HEADER + MT7925_STATION_DOMAIN_ENTRY * i;
+        Command[offset] = Profile->Channels[i].Number;
+        Command[offset + 1] = 0;
+        /* Keep flags clear: only explicitly listed channels are exposed. */
+    }
+    return bytes;
+}
+
+size_t Mt7925BuildStationPower(uint8_t *Command, const MT7922_STATION_RADIO_PROFILE *Profile, size_t First)
+{
+    if (Command == NULL || !Mt7922ValidateStationRadio(Profile) || First >= Profile->ChannelCount) {
+        return 0;
+    }
+    const size_t remaining = Profile->ChannelCount - First;
+    const size_t batch = remaining < MT7925_STATION_POWER_BATCH ? remaining : MT7925_STATION_POWER_BATCH;
+    const size_t bytes = MT7925_STATION_POWER_HEADER + MT7925_STATION_POWER_ENTRY * batch;
+    memset(Command, 0, bytes);
+    Command[4] = 1; /* Connac3 SET_POWER_LIMIT SKU TLV. */
+    Command[6] = (uint8_t)(bytes - 4U);
+    Command[7] = (uint8_t)((bytes - 4U) >> 8);
+    Command[12] = (uint8_t)batch;
+    Command[13] = 2; /* 5 GHz. */
+    Command[14] = First + batch == Profile->ChannelCount;
+    memcpy(Command + 16, Profile->Country, sizeof(Profile->Country));
+    for (size_t i = 0; i < batch; ++i) {
+        const MT7922_STATION_RADIO_CHANNEL channel = Profile->Channels[First + i];
+        uint8_t *sku = Command + MT7925_STATION_POWER_HEADER + MT7925_STATION_POWER_ENTRY * i;
+        sku[0] = channel.Number;
+        memset(sku + 1, (uint8_t)channel.LimitHalfDbm, MT7925_STATION_POWER_ENTRY - 1U);
+    }
+    return bytes;
+}
+
 size_t Mt7922BuildStationPower(uint8_t *Command, const MT7922_STATION_RADIO_PROFILE *Profile, size_t First)
 {
     /* mt76_connac_mcu_rate_txpower_band: 44-byte header, up to eight 162-byte SKUs. */

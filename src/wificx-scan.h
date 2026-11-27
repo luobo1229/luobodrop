@@ -34,6 +34,7 @@ typedef struct {
     uint32_t IhvSpecificId;
     uint32_t ReportedEntries;
     uint16_t PortId;
+    uint16_t ChipId;
     uint8_t Sequence;
     uint8_t BandIndex;
     bool Active;
