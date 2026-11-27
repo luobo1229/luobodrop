@@ -16,6 +16,10 @@
 #define HIF_REMAP           0xfe24c
 #define HIF_WINDOW          0x40000
 #define HIF_BANK_MASK       0xffff
+#define MT7925_HIF_REMAP_L1 0x155024
+#define MT7925_HIF_REMAP_MASK 0xffff0000
+#define MT7925_HIF_WINDOW_L1 0x130000
+#define MT7925_CONN_ON_WINDOW 0x0e0000
 #define WFSYS_BANK          0x1800
 #define WFSYS_RESET         0x0140
 #define WFSYS_RESET_RELEASE 0x0001
@@ -25,6 +29,13 @@
 #define CONNECTION_FIRMWARE 0x00f0
 #define CONNECTION_BAR_BASE 0xe0000
 #define CONNECTION_READY    0x0003
+#define MT7925_WTBL_ITCR    0x343b0U
+#define MT7925_WTBL_ITDR0   0x343b8U
+#define MT7925_WTBL_ITDR1   0x343bcU
+#define MT7925_WTBL_ITCR_WR (1U << 16)
+#define MT7925_WTBL_ITCR_EXEC (1U << 31)
+#define MT7925_WTBL_SPE_IDX_SEL (1U << 6)
+#define MT7925_BASIC_RATES_TABLE 14U
 #define HOST_OWN_REQUEST    0x0002
 #define FIRMWARE_OWNS       0x0004
 #define TOP_HOST_BANK       0x1806
@@ -67,6 +78,7 @@
 #define RING_CPU            0x08
 #define RING_DEVICE         0x0c
 #define TX_MCU_RING         (TX_RING_START + 17 * RING_STRIDE)
+#define MT7925_TX_MCU_RING  (TX_RING_START + 15 * RING_STRIDE)
 #define TX_ACTION_RING      TX_RING_START
 #define TX_ACTION_PREFETCH  0xd4600
 #define TX_ACTION_COUNT     64U
@@ -76,6 +88,7 @@
 #define RX_RUNTIME_RING     (RX_RING_START + 4 * RING_STRIDE)
 #define RX_DATA_RING        (RX_RING_START + 2 * RING_STRIDE)
 #define TX_MCU_PREFETCH     0xd4644
+#define MT7925_TX_MCU_PREFETCH 0xd463c
 #define TX_FWDL_PREFETCH    0xd4640
 #define RX_MCU_PREFETCH     0xd4680
 #define RX_RUNTIME_PREFETCH 0xd4690
@@ -170,12 +183,21 @@
 #define MT7922_CONN_STATE_CONNECT 1U
 #define MT7922_CONN_STATE_PORT_SECURE 2U
 #define MCU_UNI_SET_ACK     7U
+#define MCU_UNI_SET_NO_ACK  6U
 #define MCU_UNI_RESULT      1U
 #define MCU_UNI_RESULT_BYTES 8U
-#define MCU_NIC_CAP_MAC     0x07
+#define MCU_UNI_CHIP_CONFIG 0x0eU
+#define MCU_UNI_CHIP_CONFIG_NIC_CAPA 0x03U
+#define MCU_UNI_EFUSE_CTRL 0x2dU
+#define MCU_UNI_EFUSE_BUFFER_MODE 0x02U
+#define MCU_UNI_SET_DOMAIN_INFO 0x15U
+#define MCU_UNI_SET_POWER_LIMIT 0x2cU
+#define MCU_UNI_SCAN_REQ 0x16U
+#define MCU_NIC_CAP_MAC_ADDR 0x07U
 #define MCU_NIC_CAP_PHY     0x08
 #define MCU_NIC_CAP_6GHZ    0x18
 #define MCU_RX_HEADER_BYTES 36
+#define MCU_CONNAC3_RX_HEADER_BYTES 44
 #define MCU_PATCH_BYTES     137472
 #define MCU_DOWNLOAD_MODE   0x80000009
 #define MCU_SEM_RELEASE     0
@@ -185,7 +207,6 @@
 #define MCU_SEM_RELEASED    3
 #define MCU_RX_EVENT_OFFSET 28
 #define MCU_RX_SEQ_OFFSET   29
-#define MCU_ROM_RESULT_OFFSET 32
 #define MCU_ROM_RESULT_EVENT 1
 #define MCU_ROM_SEMAPHORE_EVENT 4
 #define MCU_NO_RESPONSE     MAXULONG
@@ -218,8 +239,10 @@ typedef struct _MCU_UNIFIED_COMMAND {
     UCHAR Destination;
     UCHAR Option;
     ULONG Reserved1;
-    UCHAR Payload[128];
+    UCHAR Payload[1536];
 } MCU_UNIFIED_COMMAND;
+
+C_ASSERT(sizeof(((MCU_UNIFIED_COMMAND *)0)->Payload) >= MT7925_STATION_POWER_BYTES);
 
 typedef struct _TX_RING {
     ULONG Registers;
@@ -253,6 +276,7 @@ typedef struct {
 
 typedef struct _MCU_RINGS {
     PUCHAR Registers;
+    ULONG ChipId;
     PUCHAR Buffer;
     ULONG DmaAddress;
     TX_RING ControlTx;
@@ -327,20 +351,26 @@ C_ASSERT(MCU_PATCH_BYTES + 341904 + 290768 + 15312 + 8144 + 96080
 C_ASSERT(MCU_PATCH_BYTES + 341904 + 292816 + 15312 + 8144 + 97232
     == MT7922_REFERENCE_IMAGE_BYTES);
 
-static const ULONG firmwareTargets[] = {
-    0x0091b000, 0x02015c00, 0x00404400, 0x0210a000, 0xe0200000
-};
-
+#define MCU_MAX_PATCH_REGIONS 2U
+#define MCU_MAX_RAM_REGIONS   5U
 typedef struct _MCU_FIRMWARE {
+    ULONG ChipId;
     ULONG Bytes;
     UCHAR Sha256[32];
-    ULONG RegionBytes[RTL_NUMBER_OF(firmwareTargets)];
+    ULONG PatchRegionCount;
+    ULONG PatchTargets[MCU_MAX_PATCH_REGIONS];
+    ULONG PatchRegionBytes[MCU_MAX_PATCH_REGIONS];
+    ULONG RamRegionCount;
+    ULONG RamTargets[MCU_MAX_RAM_REGIONS];
+    ULONG RamRegionBytes[MCU_MAX_RAM_REGIONS];
+    ULONG EntryAddress;
 } MCU_FIRMWARE;
 
-/* Packed payloads for the installed Windows driver and MediaTek's 2026-10-27 release.
-   The reference image omits its non-download configuration section. */
+/* Packed Connac2 download payloads. The MT7925 image comes from the
+   user's backed-up 2025-12 vendor driver; it is kept separate from 7922. */
 static const MCU_FIRMWARE acceptedFirmware[] = {
     {
+        0x7922,
         MT7922_FACTORY_IMAGE_BYTES,
         {
           0x7b, 0xc2, 0x47, 0x09, 0x56, 0xee, 0x9e, 0x26,
@@ -348,9 +378,16 @@ static const MCU_FIRMWARE acceptedFirmware[] = {
           0xff, 0xc3, 0x7d, 0xf1, 0x21, 0x6a, 0x8a, 0x95,
           0xa9, 0xff, 0xec, 0x13, 0xaf, 0x38, 0xdd, 0x2e
         },
-        {341904, 290768, 15312, 8144, 96080}
+        1,
+        {0x00900000, 0},
+        {MCU_PATCH_BYTES, 0},
+        5,
+        {0x0091b000, 0x02015c00, 0x00404400, 0x0210a000, 0xe0200000},
+        {341904, 290768, 15312, 8144, 96080},
+        0x0091b000
     },
     {
+        0x7922,
         MT7922_REFERENCE_IMAGE_BYTES,
         {
           0x42, 0xfa, 0xfd, 0x30, 0x97, 0x75, 0x50, 0x4f,
@@ -358,9 +395,34 @@ static const MCU_FIRMWARE acceptedFirmware[] = {
           0xf5, 0x67, 0x2f, 0x8f, 0x88, 0x93, 0x07, 0x8a,
           0xab, 0x06, 0x4c, 0xea, 0x52, 0xc6, 0x82, 0xc0
         },
-        {341904, 292816, 15312, 8144, 97232}
+        1,
+        {0x00900000, 0},
+        {MCU_PATCH_BYTES, 0},
+        5,
+        {0x0091b000, 0x02015c00, 0x00404400, 0x0210a000, 0xe0200000},
+        {341904, 292816, 15312, 8144, 97232},
+        0x0091b000
+    },
+    {
+        0x7925,
+        1276032,
+        {
+          0x5a, 0xe7, 0x64, 0xd3, 0x61, 0x59, 0x28, 0x15,
+          0x23, 0x7e, 0x6b, 0x68, 0x83, 0x87, 0xb8, 0xf4,
+          0xff, 0xd6, 0x14, 0x44, 0x39, 0x38, 0xf1, 0x42,
+          0xab, 0x44, 0xce, 0x54, 0x16, 0xc1, 0x16, 0x1b
+        },
+        2,
+        {0x00900000, 0xe0002800},
+        {39872, 174016},
+        4,
+        {0x0090d000, 0x02212800, 0x00404000, 0xe002d000, 0},
+        {77200, 382928, 32720, 569296, 0},
+        0x0090d000
     }
 };
+
+C_ASSERT(39872 + 174016 + 77200 + 382928 + 32720 + 569296 == 1276032);
 
 static ULONG ReadRegister(PUCHAR Window, ULONG Offset)
 {
@@ -370,6 +432,39 @@ static ULONG ReadRegister(PUCHAR Window, ULONG Offset)
 static void WriteRegister(PUCHAR Window, ULONG Offset, ULONG Value)
 {
     WRITE_REGISTER_ULONG((PULONG)(Window + Offset), Value);
+}
+
+static void ProgramMt7925BasicRates(PUCHAR Window)
+{
+    /* MT7925 uses Connac3 fixed-rate table entries. These four entries cover
+       the legacy OFDM rates used by LuoboDrop's AWDL management and data path.
+       The BAR mapping is 0x820d0000 -> 0x30000; WTBL ITCR is at +0x43b0. */
+    static const struct {
+        ULONG Index;
+        ULONG Rate;
+    } rates[] = {
+        {MT7925_BASIC_RATES_TABLE + 4U, 0x004bU}, /* OFDM 6 Mbps */
+        {MT7925_BASIC_RATES_TABLE + 6U, 0x004aU}, /* OFDM 12 Mbps */
+        {MT7925_BASIC_RATES_TABLE + 8U, 0x0049U}, /* OFDM 24 Mbps */
+        {MT7925_BASIC_RATES_TABLE + 11U, 0x004cU} /* OFDM 54 Mbps */
+    };
+
+    for (ULONG i = 0; i < RTL_NUMBER_OF(rates); ++i) {
+        WriteRegister(Window, MT7925_WTBL_ITDR0, rates[i].Rate);
+        WriteRegister(Window, MT7925_WTBL_ITDR1, MT7925_WTBL_SPE_IDX_SEL);
+        WriteRegister(Window, MT7925_WTBL_ITCR,
+            MT7925_WTBL_ITCR_WR | MT7925_WTBL_ITCR_EXEC | rates[i].Index);
+    }
+}
+
+static ULONG McuTxRingRegister(ULONG ChipId)
+{
+    return ChipId == 0x7925 ? MT7925_TX_MCU_RING : TX_MCU_RING;
+}
+
+static ULONG McuTxPrefetchRegister(ULONG ChipId)
+{
+    return ChipId == 0x7925 ? MT7925_TX_MCU_PREFETCH : TX_MCU_PREFETCH;
 }
 
 static void WaitMilliseconds(ULONG Milliseconds)
@@ -396,70 +491,115 @@ static NTSTATUS WaitRegister(PUCHAR Window, ULONG Offset, ULONG Mask,
     return STATUS_IO_TIMEOUT;
 }
 
-static NTSTATUS SelectBank(PUCHAR Window, ULONG Bank, ULONG *Saved)
+static ULONG RegisterBankWindow(ULONG ChipId, ULONG Bank)
 {
-    *Saved = ReadRegister(Window, HIF_REMAP);
+    if (ChipId == 0x7925) {
+        return Bank == CONNECTION_BANK ? MT7925_CONN_ON_WINDOW : MT7925_HIF_WINDOW_L1;
+    }
+    return HIF_WINDOW;
+}
+
+static ULONG RegisterRemapAddress(ULONG ChipId)
+{
+    return ChipId == 0x7925 ? MT7925_HIF_REMAP_L1 : HIF_REMAP;
+}
+
+static ULONG RegisterRemapMask(ULONG ChipId)
+{
+    return ChipId == 0x7925 ? MT7925_HIF_REMAP_MASK : HIF_BANK_MASK;
+}
+
+static NTSTATUS SelectBank(PUCHAR Window, ULONG ChipId, ULONG Bank, ULONG *Saved)
+{
+    const ULONG remap = RegisterRemapAddress(ChipId);
+    const ULONG mask = RegisterRemapMask(ChipId);
+    *Saved = ReadRegister(Window, remap);
     if (*Saved == MAXULONG) {
         return STATUS_DEVICE_NOT_READY;
     }
-    WriteRegister(Window, HIF_REMAP, (*Saved & ~HIF_BANK_MASK) | Bank);
-    if ((ReadRegister(Window, HIF_REMAP) & HIF_BANK_MASK) != Bank) {
-        WriteRegister(Window, HIF_REMAP, *Saved);
+    /* MT7925 maps CONN_ON at a fixed BAR0 address; other banks use L1 remap. */
+    if (ChipId == 0x7925 && Bank == CONNECTION_BANK) {
+        return STATUS_SUCCESS;
+    }
+    const ULONG selected = ChipId == 0x7925
+        ? ((*Saved & ~mask) | (Bank << 16))
+        : ((*Saved & ~mask) | Bank);
+    WriteRegister(Window, remap, selected);
+    if ((ReadRegister(Window, remap) & mask) != (selected & mask)) {
+        WriteRegister(Window, remap, *Saved);
         return STATUS_DEVICE_HARDWARE_ERROR;
     }
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS RestoreBank(PUCHAR Window, ULONG Saved, NTSTATUS Status)
+static NTSTATUS RestoreBank(PUCHAR Window, ULONG ChipId, ULONG Saved, NTSTATUS Status)
 {
-    WriteRegister(Window, HIF_REMAP, Saved);
-    ULONG now = ReadRegister(Window, HIF_REMAP);
-    if (now == MAXULONG || (now & HIF_BANK_MASK) != (Saved & HIF_BANK_MASK)) {
+    const ULONG remap = RegisterRemapAddress(ChipId);
+    const ULONG mask = RegisterRemapMask(ChipId);
+    WriteRegister(Window, remap, Saved);
+    ULONG now = ReadRegister(Window, remap);
+    if (now == MAXULONG || (now & mask) != (Saved & mask)) {
         return STATUS_DEVICE_HARDWARE_ERROR;
     }
     return Status;
 }
 
-static NTSTATUS ResetWireless(PUCHAR Window, ULONG *ResetResult)
+static NTSTATUS ResetWireless(PUCHAR Window, ULONG ChipId, ULONG *ResetResult)
 {
+    if (ChipId == 0x7925) {
+        /* MT7925 maps MT_WFSYS_SW_RST_B at BAR0 0x0f0140. */
+        const ULONG resetRegister = 0x0f0140;
+        ULONG initial = ReadRegister(Window, resetRegister);
+        if (initial == MAXULONG) {
+            return STATUS_DEVICE_NOT_READY;
+        }
+        WriteRegister(Window, resetRegister, initial & ~WFSYS_RESET_RELEASE);
+        WaitMilliseconds(50);
+        WriteRegister(Window, resetRegister, initial | WFSYS_RESET_RELEASE);
+        return WaitRegister(Window, resetRegister, WFSYS_INIT_DONE,
+            WFSYS_INIT_DONE, 500, ResetResult);
+    }
+
     ULONG saved;
-    NTSTATUS status = SelectBank(Window, WFSYS_BANK, &saved);
+    NTSTATUS status = SelectBank(Window, ChipId, WFSYS_BANK, &saved);
     if (!NT_SUCCESS(status)) {
         return status;
     }
-    ULONG initial = ReadRegister(Window, HIF_WINDOW + WFSYS_RESET);
+    const ULONG bankWindow = RegisterBankWindow(ChipId, WFSYS_BANK);
+    ULONG initial = ReadRegister(Window, bankWindow + WFSYS_RESET);
     if (initial == MAXULONG) {
-        return RestoreBank(Window, saved, STATUS_DEVICE_NOT_READY);
+        return RestoreBank(Window, ChipId, saved, STATUS_DEVICE_NOT_READY);
     }
-    WriteRegister(Window, HIF_WINDOW + WFSYS_RESET, initial & ~WFSYS_RESET_RELEASE);
+    WriteRegister(Window, bankWindow + WFSYS_RESET, initial & ~WFSYS_RESET_RELEASE);
     WaitMilliseconds(50);
-    WriteRegister(Window, HIF_WINDOW + WFSYS_RESET, initial | WFSYS_RESET_RELEASE);
-    status = WaitRegister(Window, HIF_WINDOW + WFSYS_RESET, WFSYS_INIT_DONE,
+    WriteRegister(Window, bankWindow + WFSYS_RESET, initial | WFSYS_RESET_RELEASE);
+    status = WaitRegister(Window, bankWindow + WFSYS_RESET, WFSYS_INIT_DONE,
         WFSYS_INIT_DONE, 500, ResetResult);
-    return RestoreBank(Window, saved, status);
+    return RestoreBank(Window, ChipId, saved, status);
 }
 
-static NTSTATUS ReadBootRomState(PUCHAR Window, ULONG *FirmwareState)
+static NTSTATUS ReadBootRomState(PUCHAR Window, ULONG ChipId, ULONG *FirmwareState)
 {
     ULONG saved;
-    NTSTATUS status = SelectBank(Window, CONNECTION_BANK, &saved);
+    NTSTATUS status = SelectBank(Window, ChipId, CONNECTION_BANK, &saved);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    if (ReadRegister(Window, HIF_WINDOW + CONNECTION_OWN) == MAXULONG) {
-        return RestoreBank(Window, saved, STATUS_DEVICE_NOT_READY);
+    const ULONG bankWindow = RegisterBankWindow(ChipId, CONNECTION_BANK);
+    if (ReadRegister(Window, bankWindow + CONNECTION_OWN) == MAXULONG) {
+        return RestoreBank(Window, ChipId, saved, STATUS_DEVICE_NOT_READY);
     }
-    WriteRegister(Window, HIF_WINDOW + CONNECTION_OWN, HOST_OWN_REQUEST);
+    WriteRegister(Window, bankWindow + CONNECTION_OWN, HOST_OWN_REQUEST);
     ULONG owner;
-    status = WaitRegister(Window, HIF_WINDOW + CONNECTION_OWN, FIRMWARE_OWNS, 0, 150, &owner);
+    status = WaitRegister(Window, bankWindow + CONNECTION_OWN, FIRMWARE_OWNS, 0, 150, &owner);
     if (NT_SUCCESS(status)) {
-        *FirmwareState = ReadRegister(Window, HIF_WINDOW + CONNECTION_FIRMWARE);
+        *FirmwareState = ReadRegister(Window, bankWindow + CONNECTION_FIRMWARE);
         if (*FirmwareState == MAXULONG || (*FirmwareState & 0x3) == 0x3) {
             status = STATUS_DEVICE_NOT_READY;
         }
     }
-    return RestoreBank(Window, saved, status);
+    return RestoreBank(Window, ChipId, saved, status);
 }
 
 static NTSTATUS ResetDmaLogic(PUCHAR Window, ULONG *Observed)
@@ -511,6 +651,7 @@ static void AssignRxRing(MCU_RINGS *Rings, MT7922_RX_RING *Ring, ULONG Registers
     Ring->DescriptorAddress = Rings->DmaAddress + DescriptorOffset;
     Ring->BufferAddress = Rings->DmaAddress + BufferOffset;
     Ring->Count = Count;
+    Ring->ChipId = (USHORT)Rings->ChipId;
 }
 
 static NTSTATUS RequireIdleDma(PUCHAR Window, MT7922_MCU_PROBE_INFO *Result)
@@ -577,19 +718,24 @@ static NTSTATUS PrepareMcuTransport(MCU_RINGS *Rings, MT7922_MCU_PROBE_INFO *Res
 {
     PUCHAR window = Rings->Registers;
     ULONG saved, owner;
-    NTSTATUS status = SelectBank(window, TOP_HOST_BANK, &saved);
+    const BOOLEAN mt7925 = Rings->ChipId == 0x7925;
+    const ULONG bank = mt7925 ? CONNECTION_BANK : TOP_HOST_BANK;
+    const ULONG ownerRegister = mt7925 ? CONNECTION_OWN : TOP_HOST_LPCR;
+    const ULONG ownerMask = mt7925 ? FIRMWARE_OWNS : TOP_HOST_FW_OWN;
+    NTSTATUS status = SelectBank(window, Rings->ChipId, bank, &saved);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    WriteRegister(window, HIF_WINDOW + TOP_HOST_LPCR, HOST_OWN_REQUEST);
-    status = WaitRegister(window, HIF_WINDOW + TOP_HOST_LPCR,
-        TOP_HOST_FW_OWN, 0, 500, &owner);
+    const ULONG bankWindow = RegisterBankWindow(Rings->ChipId, bank);
+    WriteRegister(window, bankWindow + ownerRegister, HOST_OWN_REQUEST);
+    status = WaitRegister(window, bankWindow + ownerRegister,
+        ownerMask, 0, 500, &owner);
     if (!NT_SUCCESS(status)) {
-        Result->BlockedRegister = 0x18060010;
+        Result->BlockedRegister = mt7925 ? bankWindow + ownerRegister : 0x18060010;
         Result->BlockedValue = owner;
     }
-    status = RestoreBank(window, saved, status);
+    status = RestoreBank(window, Rings->ChipId, saved, status);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -687,10 +833,12 @@ static NTSTATUS PrepareDma(MCU_RINGS *Rings, MT7922_MCU_PROBE_INFO *Result)
     }
 
     WriteRegister(window, DMA_DELAY_INTERRUPT, 0);
-    WriteRegister(window, TX_MCU_PREFETCH, 0x03800004);
+    WriteRegister(window, McuTxPrefetchRegister(Rings->ChipId), 0x03800004);
     WriteRegister(window, TX_FWDL_PREFETCH, 0x03400004);
     WriteRegister(window, RX_MCU_PREFETCH, 0x00000004);
-    WriteRegister(window, RX_RUNTIME_PREFETCH, 0x00c00004);
+    if (Rings->ChipId != 0x7925) {
+        WriteRegister(window, RX_RUNTIME_PREFETCH, 0x00c00004);
+    }
     WriteRegister(window, DMA_RESET_TX_INDEX, MAXULONG);
     Rings->Programmed = TRUE;
     ProgramTxRing(Rings, &Rings->ControlTx);
@@ -700,7 +848,9 @@ static NTSTATUS PrepareDma(MCU_RINGS *Rings, MT7922_MCU_PROBE_INFO *Result)
         ProgramTxRing(Rings, &Rings->ActionTx);
     }
     Mt7922ProgramRxRing(&Rings->RomEvents);
-    Mt7922ProgramRxRing(&Rings->RuntimeEvents);
+    if (Rings->ChipId != 0x7925) {
+        Mt7922ProgramRxRing(&Rings->RuntimeEvents);
+    }
     if (Rings->DataRx.Count != 0) {
         WriteRegister(window, RX_DATA_PREFETCH, 0x00400004);
         Mt7922ProgramRxRing(&Rings->DataRx);
@@ -709,20 +859,23 @@ static NTSTATUS PrepareDma(MCU_RINGS *Rings, MT7922_MCU_PROBE_INFO *Result)
     const struct {
         ULONG Base;
         ULONG Expected[4]; /* descriptor base, count, host index, device index */
+        BOOLEAN Active;
     } programmed[] = {
-        {TX_MCU_RING, {Rings->DmaAddress, TX_DESCRIPTOR_COUNT, 0, 0}},
-        {TX_FWDL_RING, {Rings->DmaAddress + FWDL_RING_OFFSET, FWDL_DESCRIPTOR_COUNT, 0, 0}},
+        {McuTxRingRegister(Rings->ChipId), {Rings->DmaAddress, TX_DESCRIPTOR_COUNT, 0, 0}, TRUE},
+        {TX_FWDL_RING, {Rings->DmaAddress + FWDL_RING_OFFSET, FWDL_DESCRIPTOR_COUNT, 0, 0}, TRUE},
         {RX_MCU_RING, {Rings->RomEvents.DescriptorAddress, RX_DESCRIPTOR_COUNT,
-            Rings->RomEvents.Producer, 0}},
+            Rings->RomEvents.Producer, 0}, TRUE},
         {RX_RUNTIME_RING, {Rings->RuntimeEvents.DescriptorAddress, RX_DESCRIPTOR_COUNT,
-            Rings->RuntimeEvents.Producer, 0}},
+            Rings->RuntimeEvents.Producer, 0}, Rings->ChipId != 0x7925},
         {RX_DATA_RING, {Rings->DataRx.DescriptorAddress, Rings->DataRx.Count,
-            Rings->DataRx.Producer, 0}},
-        {TX_ACTION_RING, {Rings->DmaAddress + ACTION_RING_OFFSET, Rings->ActionTx.Count, 0, 0}}
+            Rings->DataRx.Producer, 0}, Rings->DataRx.Count != 0},
+        {TX_ACTION_RING, {Rings->DmaAddress + ACTION_RING_OFFSET, Rings->ActionTx.Count, 0, 0},
+            Rings->ActionTx.Count != 0}
     };
-    const ULONG programmedCount = RTL_NUMBER_OF(programmed)
-        - (Rings->DataRx.Count == 0) - (Rings->ActionTx.Count == 0);
-    for (ULONG i = 0; i < programmedCount; ++i) {
+    for (ULONG i = 0; i < RTL_NUMBER_OF(programmed); ++i) {
+        if (!programmed[i].Active) {
+            continue;
+        }
         for (ULONG field = 0; field < RTL_NUMBER_OF(programmed[i].Expected); ++field) {
             status = CheckDmaRegister(window, programmed[i].Base + field * sizeof(ULONG),
                 programmed[i].Expected[field], Result);
@@ -816,6 +969,104 @@ static ULONG ReadLittleEndian32(const UCHAR *Bytes)
         ((ULONG)Bytes[2] << 16) | ((ULONG)Bytes[3] << 24);
 }
 
+static USHORT ReadLittleEndian16(const UCHAR *Bytes)
+{
+    return (USHORT)((USHORT)Bytes[0] | ((USHORT)Bytes[1] << 8));
+}
+
+static ULONG McuRxHeaderBytes(ULONG ChipId)
+{
+    return ChipId == 0x7925 ? MCU_CONNAC3_RX_HEADER_BYTES : MCU_RX_HEADER_BYTES;
+}
+
+static ULONG McuRxEventOffset(ULONG ChipId)
+{
+    /* Connac RXD stores the event fields in its final eight header bytes. */
+    return McuRxHeaderBytes(ChipId) - 8U;
+}
+
+static NTSTATUS ParseMt7925NicCapabilities(const UCHAR *Payload, ULONG Length,
+    MT7922_MCU_PROBE_INFO *Result)
+{
+    enum { MT7925_PHY_CAP_BYTES = 13U, MT7925_TLV_HEADER_BYTES = 4U };
+    if (Payload == NULL || Length < 4U) {
+        return STATUS_DEVICE_PROTOCOL_ERROR;
+    }
+
+    const ULONG elements = ReadLittleEndian16(Payload);
+    ULONG remaining = Length - 4U;
+    const UCHAR *cursor = Payload + 4U;
+    if (elements > remaining / MT7925_TLV_HEADER_BYTES) {
+        return STATUS_DEVICE_PROTOCOL_ERROR;
+    }
+
+    ULONG bands = 0;
+    ULONG streams = 0;
+    ULONG width = 0;
+    ULONG standards = 0;
+    BOOLEAN foundMac = FALSE;
+    BOOLEAN foundPhy = FALSE;
+    UCHAR mac[sizeof(Result->NicMac)] = {0};
+
+    for (ULONG i = 0; i < elements; ++i) {
+        if (remaining < MT7925_TLV_HEADER_BYTES) {
+            return STATUS_DEVICE_PROTOCOL_ERROR;
+        }
+        const USHORT tag = ReadLittleEndian16(cursor);
+        const USHORT tlvBytes = ReadLittleEndian16(cursor + 2U);
+        if (tlvBytes < MT7925_TLV_HEADER_BYTES || tlvBytes > remaining) {
+            return STATUS_DEVICE_PROTOCOL_ERROR;
+        }
+        const UCHAR *data = cursor + MT7925_TLV_HEADER_BYTES;
+        const ULONG dataBytes = (ULONG)tlvBytes - MT7925_TLV_HEADER_BYTES;
+
+        if (tag == MCU_NIC_CAP_MAC_ADDR) {
+            if (dataBytes < sizeof(mac)) {
+                return STATUS_DEVICE_PROTOCOL_ERROR;
+            }
+            RtlCopyMemory(mac, data, sizeof(mac));
+            foundMac = TRUE;
+        } else if (tag == MCU_NIC_CAP_PHY) {
+            if (dataBytes < MT7925_PHY_CAP_BYTES || data[4] == 0 || data[4] > 8) {
+                return STATUS_DEVICE_PROTOCOL_ERROR;
+            }
+            bands |= (data[10] & 0x01U) ? MT7922_NIC_BAND_24GHZ : 0;
+            bands |= (data[10] & 0x02U) ? MT7922_NIC_BAND_5GHZ : 0;
+            streams = data[4];
+            width = data[3];
+            if (data[0]) standards |= MT7922_NIC_PHY_HT;
+            if (data[1]) standards |= MT7922_NIC_PHY_VHT;
+            if (data[11]) standards |= MT7922_NIC_PHY_HE;
+            if (data[12]) standards |= MT7922_NIC_PHY_EHT;
+            foundPhy = TRUE;
+        } else if (tag == MCU_NIC_CAP_6GHZ) {
+            if (dataBytes < 1U) {
+                return STATUS_DEVICE_PROTOCOL_ERROR;
+            }
+            if (data[0]) bands |= MT7922_NIC_BAND_6GHZ;
+        }
+
+        cursor += tlvBytes;
+        remaining -= tlvBytes;
+    }
+
+    UCHAR macBits = 0;
+    for (ULONG i = 0; i < sizeof(mac); ++i) {
+        macBits |= mac[i];
+    }
+    if (!foundMac || !foundPhy || macBits == 0 || (mac[0] & 1U) != 0 ||
+        streams == 0 || bands == 0) {
+        return STATUS_DEVICE_PROTOCOL_ERROR;
+    }
+
+    RtlCopyMemory(Result->NicMac, mac, sizeof(mac));
+    Result->NicBands = bands;
+    Result->NicSpatialStreams = streams;
+    Result->NicBandwidthCode = width;
+    Result->NicPhyFlags = standards;
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS ParseNicCapabilities(const UCHAR *Frame, ULONG Length, MT7922_MCU_PROBE_INFO *Result)
 {
     if (Length < MCU_RX_HEADER_BYTES + 4) {
@@ -855,7 +1106,7 @@ static NTSTATUS ParseNicCapabilities(const UCHAR *Frame, ULONG Length, MT7922_MC
             if (payload[0]) standards |= MT7922_NIC_PHY_HT;
             if (payload[1]) standards |= MT7922_NIC_PHY_VHT;
             if (payload[11]) standards |= MT7922_NIC_PHY_HE;
-        } else if (type == MCU_NIC_CAP_MAC && bytes >= sizeof(Result->NicMac)) {
+        } else if (type == MCU_NIC_CAP_MAC_ADDR && bytes >= sizeof(Result->NicMac)) {
             RtlCopyMemory(Result->NicMac, payload, sizeof(Result->NicMac));
         } else if (type == MCU_NIC_CAP_6GHZ) {
             if (bytes == 0) {
@@ -884,6 +1135,9 @@ void Mt7922McuSetScanReceiver(MCU_RINGS *Rings, void *Context,
     Rings->ScanFrame = Frame;
 }
 
+static NTSTATUS ExchangeUnifiedWait(MCU_RINGS *Rings, UCHAR CommandId, const UCHAR *Payload,
+    ULONG PayloadBytes, MT7922_MCU_PROBE_INFO *Result, ULONG TimeoutMs, bool Sensitive);
+
 int32_t Mt7922McuSubmitStationScan(void *Context, uint8_t Command,
     const uint8_t *Payload, size_t Bytes)
 {
@@ -905,6 +1159,33 @@ int32_t Mt7922McuSubmitStationScan(void *Context, uint8_t Command,
             return STATUS_NOT_SUPPORTED;
         }
         Payload = scan;
+    }
+    if (rings->ChipId == MT7925_CHIP_ID) {
+        uint8_t unified[MT7925_SCAN_REQUEST_MAX_BYTES];
+        size_t unifiedBytes;
+        if (Command == MT7922_SCAN_START_COMMAND) {
+            unifiedBytes = Mt7925BuildScanRequest(unified, sizeof(unified), Payload, Bytes);
+        } else if (Command == MT7922_SCAN_CANCEL_COMMAND && transport->ScanActive &&
+            Payload != NULL && Bytes == MT7922_SCAN_CANCEL_BYTES &&
+            (Payload[0] & 0x7fU) == (transport->ScanSequence & 0x7fU)) {
+            unifiedBytes = Mt7925BuildScanCancel(unified, sizeof(unified),
+                transport->ScanSequence, transport->ScanBssIndex);
+        } else {
+            return STATUS_NOT_SUPPORTED;
+        }
+        if (unifiedBytes == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        NTSTATUS status = ExchangeUnifiedWait(rings, MCU_UNI_SCAN_REQ, unified,
+            (ULONG)unifiedBytes, transport->Result, 3000, false);
+        if (NT_SUCCESS(status) && Command == MT7922_SCAN_START_COMMAND) {
+            transport->ScanSequence = Payload[0];
+            transport->ScanBssIndex = Payload[1];
+            transport->ScanActive = true;
+        } else if (NT_SUCCESS(status) && Command == MT7922_SCAN_CANCEL_COMMAND) {
+            transport->ScanActive = false;
+        }
+        return status;
     }
     uint8_t packet[MT7922_SCAN_TX_BYTES];
     const uint8_t sequence = (uint8_t)(rings->Sequence % 15 + 1);
@@ -1036,7 +1317,7 @@ static void RecordSharedAdvertTxReport(MCU_RINGS *Rings, const UCHAR *Data, ULON
                 .Wcid = slot->Wcid
             };
             MT7922_TX_REPORT report;
-            if (Mt7922ReadTxReport(Data, Length, &tx, &report) == Mt7922TxReportMatched &&
+            if (Mt792xReadTxReport((USHORT)Rings->ChipId, Data, Length, &tx, &report) == Mt7922TxReportMatched &&
                 report.Sequence == slot->Sequence) {
                 slot->Report = report;
                 slot->ReportSeen = true;
@@ -1055,7 +1336,7 @@ static void RecordSharedAdvertTxReport(MCU_RINGS *Rings, const UCHAR *Data, ULON
     }
     const MT7922_AWDL_TX tx = {.PacketId = STATION_SHARED_PACKET_ID, .Wcid = Rings->SharedAdvertWcid};
     MT7922_TX_REPORT report;
-    if (Mt7922ReadTxReport(Data, Length, &tx, &report) == Mt7922TxReportMatched &&
+    if (Mt792xReadTxReport((USHORT)Rings->ChipId, Data, Length, &tx, &report) == Mt7922TxReportMatched &&
         report.Sequence == Rings->SharedAdvertSequence) {
         debug->TxReportSeen = 1;
         debug->TxRateCode = report.RateCode;
@@ -1068,7 +1349,8 @@ static bool ConsumeStationTxRelease(MCU_RINGS *Rings, const UCHAR *Data, ULONG L
     MT7922_TX_RELEASE release;
     bool sharedReleased = false;
     if (Rings->SharedAdvertReleasePending &&
-        Mt7922ReadTxRelease(Data, Length, STATION_SHARED_TOKEN, &release) == Mt7922TxReportMatched) {
+        Mt792xReadTxRelease((USHORT)Rings->ChipId, Data, Length, STATION_SHARED_TOKEN,
+            &release) == Mt7922TxReportMatched) {
         Rings->SharedAdvertReleasePending = false;
         Rings->SharedAdvertDmaPending = false;
         MT7922_AWDL_SYN_ACK_QUEUE_TIMING *timing = Rings->SharedSynAckQueueTiming;
@@ -1097,7 +1379,8 @@ static bool ConsumeStationTxRelease(MCU_RINGS *Rings, const UCHAR *Data, ULONG L
         for (ULONG i = 0; i < STATION_SHARED_TX_SLOTS; ++i) {
             STATION_SHARED_ACK_TX *slot = &Rings->SharedAckTx[i];
             if (slot->SubmittedAt != 0 && !slot->Released &&
-                Mt7922ReadTxRelease(Data, Length, (USHORT)(STATION_SHARED_TX_TOKEN_BASE + i),
+                Mt792xReadTxRelease((USHORT)Rings->ChipId, Data, Length,
+                    (USHORT)(STATION_SHARED_TX_TOKEN_BASE + i),
                     &release) == Mt7922TxReportMatched) {
                 slot->Released = true;
                 slot->ReleaseStatus = release.Status;
@@ -1115,7 +1398,7 @@ static bool ConsumeStationTxRelease(MCU_RINGS *Rings, const UCHAR *Data, ULONG L
         ObserveStationDataDma(Rings, ReadRegister(Rings->Registers, Rings->ActionTx.Registers + RING_DEVICE));
         for (ULONG i = 0; i < MT7922_STATION_DATA_TX_SLOTS; ++i) {
             STATION_DATA_TX *slot = &Rings->StationDataTx[i];
-            if (slot->SubmittedAt == 0 || Mt7922ReadTxRelease(Data, Length,
+            if (slot->SubmittedAt == 0 || Mt792xReadTxRelease((USHORT)Rings->ChipId, Data, Length,
                     (USHORT)(STATION_DATA_TX_TOKEN_BASE + i), &release) != Mt7922TxReportMatched) {
                 continue;
             }
@@ -1124,9 +1407,11 @@ static bool ConsumeStationTxRelease(MCU_RINGS *Rings, const UCHAR *Data, ULONG L
                 RecordStationDataDma(Rings, slot, true);
             }
             MT7922_STATION_DATA_DEBUG *debug = Rings->StationDataDebug;
-            ++debug->TxCompleted;
-            debug->TxCompletionErrors += release.Status != 0;
-            debug->TxReleaseStatus = release.Status;
+            if (debug != NULL) {
+                ++debug->TxCompleted;
+                debug->TxCompletionErrors += release.Status != 0;
+                debug->TxReleaseStatus = release.Status;
+            }
             if (StationDataTraceCurrent(Rings, slot)) {
                 MT7922_STATION_IO_DEBUG *trace = Rings->StationIoDebug;
                 ++trace->TxReleased;
@@ -1147,7 +1432,8 @@ static bool ConsumeStationTxRelease(MCU_RINGS *Rings, const UCHAR *Data, ULONG L
         }
     }
     if (Rings->StationTxPending &&
-        Mt7922ReadTxRelease(Data, Length, Rings->StationTxToken, &release) == Mt7922TxReportMatched) {
+        Mt792xReadTxRelease((USHORT)Rings->ChipId, Data, Length,
+            Rings->StationTxToken, &release) == Mt7922TxReportMatched) {
         Rings->StationTxPending = false;
         Rings->StationTxStatus = release.Status;
         return true;
@@ -1168,14 +1454,18 @@ static BOOLEAN ConsumeMcuEvent(MCU_RINGS *Rings, MT7922_RX_RING *Ring, UCHAR Seq
     if (length <= RX_BUFFER_BYTES && (control & DESCRIPTOR_LAST0) != 0 &&
         (control & (DESCRIPTOR_DROP | DESCRIPTOR_TO_HOST_A)) == 0) {
         /* Like mt76, dispatch TX-free records independently of the MCU command reply. */
-        if (Rings->StationDataDebug != NULL && !Ring->DiscardContinuation && length >= sizeof(ULONG)) {
+        if (!Ring->DiscardContinuation && length >= sizeof(ULONG)) {
             const ULONG packetType = ReadLittleEndian32(data) >> 27;
             if (packetType == MT7922_TX_RELEASE_PACKET_TYPE) {
-                const ULONG completed = Rings->StationDataDebug->TxCompleted;
+                const ULONG completed = Rings->StationDataDebug != NULL
+                    ? Rings->StationDataDebug->TxCompleted : 0;
                 const bool stationPending = Rings->StationTxPending;
                 ConsumeStationTxRelease(Rings, data, length);
-                Rings->StationDataDebug->TxReleaseDuringCommand +=
-                    Rings->StationDataDebug->TxCompleted != completed || (stationPending && !Rings->StationTxPending);
+                if (Rings->StationDataDebug != NULL) {
+                    Rings->StationDataDebug->TxReleaseDuringCommand +=
+                        Rings->StationDataDebug->TxCompleted != completed ||
+                        (stationPending && !Rings->StationTxPending);
+                }
                 Mt7922RecycleRxRing(Ring);
                 return TRUE;
             }
@@ -1188,16 +1478,24 @@ static BOOLEAN ConsumeMcuEvent(MCU_RINGS *Rings, MT7922_RX_RING *Ring, UCHAR Seq
             return TRUE;
         }
     }
-    if (length > MCU_RX_SEQ_OFFSET && length <= RX_BUFFER_BYTES) {
-        Result->EventId = data[MCU_RX_EVENT_OFFSET];
-        Result->EventSequence = data[MCU_RX_SEQ_OFFSET];
+    const ULONG rxHeaderBytes = McuRxHeaderBytes(Rings->ChipId);
+    const ULONG eventOffset = McuRxEventOffset(Rings->ChipId);
+    if (length > eventOffset + 1U && length <= RX_BUFFER_BYTES) {
+        Result->EventId = data[eventOffset];
+        Result->EventSequence = data[eventOffset + 1U];
         if (Result->EventSequence == Sequence) {
             if (CommandId == MCU_NIC_CAPABILITIES) {
                 *Outcome = ParseNicCapabilities(data, length, Result);
             } else if (CommandId & MCU_UNIFIED_FLAG) {
-                const UCHAR *payload = data + MCU_RX_HEADER_BYTES;
-                if (Result->EventId == MCU_UNI_RESULT &&
-                    length >= MCU_RX_HEADER_BYTES + MCU_UNI_RESULT_BYTES &&
+                const UCHAR *payload = data + rxHeaderBytes;
+                if (Rings->ChipId == 0x7925 &&
+                    (UCHAR)CommandId == MCU_UNI_CHIP_CONFIG) {
+                    *Reply = 0;
+                    *Outcome = length >= rxHeaderBytes
+                        ? ParseMt7925NicCapabilities(payload, length - rxHeaderBytes, Result)
+                        : STATUS_DEVICE_PROTOCOL_ERROR;
+                } else if (Result->EventId == MCU_UNI_RESULT &&
+                    length >= rxHeaderBytes + MCU_UNI_RESULT_BYTES &&
                     payload[0] == (UCHAR)CommandId) {
                     Result->MonitorReply = ReadLittleEndian32(payload + 4);
                     *Reply = Result->MonitorReply;
@@ -1206,8 +1504,8 @@ static BOOLEAN ConsumeMcuEvent(MCU_RINGS *Rings, MT7922_RX_RING *Ring, UCHAR Seq
                     *Outcome = STATUS_DEVICE_PROTOCOL_ERROR;
                 }
             } else if (CommandId == MCU_CE_REG_READ) {
-                const UCHAR *payload = data + MCU_RX_HEADER_BYTES;
-                if (length >= MCU_RX_HEADER_BYTES + 8 &&
+                const UCHAR *payload = data + rxHeaderBytes;
+                if (length >= rxHeaderBytes + 8 &&
                     ReadLittleEndian32(payload) == MCU_REG_PSE_BASE) {
                     *Reply = ReadLittleEndian32(payload + 4);
                     *Outcome = STATUS_SUCCESS;
@@ -1216,16 +1514,16 @@ static BOOLEAN ConsumeMcuEvent(MCU_RINGS *Rings, MT7922_RX_RING *Ring, UCHAR Seq
                 }
             } else if ((UCHAR)CommandId == MCU_EXTENDED) {
                 /* Extended runtime replies are matched by sequence, as in mt7921. */
-                *Outcome = length < MCU_RX_HEADER_BYTES
+                *Outcome = length < rxHeaderBytes
                     ? STATUS_DEVICE_PROTOCOL_ERROR : STATUS_SUCCESS;
                 *Reply = 0;
                 Result->ReplyPayloadBytes = 0;
                 if (NT_SUCCESS(*Outcome)) {
-                    ULONG bytes = length - MCU_RX_HEADER_BYTES;
+                    ULONG bytes = length - rxHeaderBytes;
                     if (bytes > sizeof(Result->ReplyPayload)) {
                         bytes = sizeof(Result->ReplyPayload);
                     }
-                    RtlCopyMemory(Result->ReplyPayload, data + MCU_RX_HEADER_BYTES, bytes);
+                    RtlCopyMemory(Result->ReplyPayload, data + rxHeaderBytes, bytes);
                     Result->ReplyPayloadBytes = bytes;
                 }
             } else {
@@ -1236,10 +1534,11 @@ static BOOLEAN ConsumeMcuEvent(MCU_RINGS *Rings, MT7922_RX_RING *Ring, UCHAR Seq
                     Result->RomResultBytes = length;
                     Result->RomResultStatus = MCU_NO_RESPONSE;
                 }
-                if (length <= MCU_ROM_RESULT_OFFSET || Result->EventId != expected) {
+                const ULONG resultOffset = rxHeaderBytes - 4U;
+                if (length <= resultOffset || Result->EventId != expected) {
                     *Outcome = STATUS_DEVICE_PROTOCOL_ERROR;
                 } else {
-                    *Reply = data[MCU_ROM_RESULT_OFFSET];
+                    *Reply = data[resultOffset];
                     if (!semaphore) {
                         Result->RomResultStatus = *Reply;
                     }
@@ -1265,10 +1564,13 @@ static NTSTATUS WaitForMcuReply(MCU_RINGS *Rings, UCHAR Sequence, ULONG CommandI
         if (outcome != STATUS_PENDING) {
             return outcome;
         }
-        BOOLEAN runtimeEvent = ConsumeMcuEvent(Rings, &Rings->RuntimeEvents, Sequence,
-            CommandId, Reply, Result, &outcome);
-        if (outcome != STATUS_PENDING) {
-            return outcome;
+        BOOLEAN runtimeEvent = FALSE;
+        if (Rings->ChipId != 0x7925) {
+            runtimeEvent = ConsumeMcuEvent(Rings, &Rings->RuntimeEvents, Sequence,
+                CommandId, Reply, Result, &outcome);
+            if (outcome != STATUS_PENDING) {
+                return outcome;
+            }
         }
         if (!romEvent && !runtimeEvent) {
             WaitMilliseconds(1);
@@ -1330,7 +1632,8 @@ static NTSTATUS ExchangeUnifiedWait(MCU_RINGS *Rings, UCHAR CommandId, const UCH
     command.Length = (USHORT)(length - sizeof(command.Hardware));
     command.Command = CommandId;
     command.PacketId = MCU_PACKET_ID;
-    command.Option = MCU_UNI_SET_ACK;
+    command.Option = Rings->ChipId == 0x7925 && CommandId == MCU_UNI_CHIP_CONFIG
+        ? MCU_UNI_SET_NO_ACK : MCU_UNI_SET_ACK;
     Rings->Sequence = (UCHAR)(Rings->Sequence % 15 + 1);
     command.Sequence = Rings->Sequence;
     RtlCopyMemory(command.Payload, Payload, PayloadBytes);
@@ -1384,10 +1687,11 @@ static NTSTATUS DownloadRegion(MCU_RINGS *Rings, const UCHAR *Data, ULONG Target
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS WaitForFirmwareReady(PUCHAR Window, MT7922_MCU_PROBE_INFO *Result)
+static NTSTATUS WaitForFirmwareReady(PUCHAR Window, ULONG ChipId, MT7922_MCU_PROBE_INFO *Result)
 {
-    /* MT_CONN_ON_MISC at 0x7c0600f0 has a fixed BAR0 mapping on MT7922. */
-    const ULONG ready = CONNECTION_BAR_BASE + CONNECTION_FIRMWARE;
+    /* MT7925 and MT7922 expose CONN_ON_MISC at the same fixed BAR0 address. */
+    const ULONG bankWindow = RegisterBankWindow(ChipId, CONNECTION_BANK);
+    const ULONG ready = bankWindow + CONNECTION_FIRMWARE;
     NTSTATUS status = WaitRegister(Window, ready, CONNECTION_READY, CONNECTION_READY,
         1500, &Result->FirmwareReady);
     if (!NT_SUCCESS(status)) {
@@ -1396,9 +1700,9 @@ static NTSTATUS WaitForFirmwareReady(PUCHAR Window, MT7922_MCU_PROBE_INFO *Resul
     }
 
     ULONG saved;
-    if (NT_SUCCESS(SelectBank(Window, CONNECTION_BANK, &saved))) {
-        Result->FirmwareReadyRemapped = ReadRegister(Window, HIF_WINDOW + CONNECTION_FIRMWARE);
-        return RestoreBank(Window, saved, status);
+    if (NT_SUCCESS(SelectBank(Window, ChipId, CONNECTION_BANK, &saved))) {
+        Result->FirmwareReadyRemapped = ReadRegister(Window, bankWindow + CONNECTION_FIRMWARE);
+        return RestoreBank(Window, ChipId, saved, status);
     }
     return status;
 }
@@ -1415,8 +1719,16 @@ static NTSTATUS RunCommands(MCU_RINGS *Rings, const UCHAR *Image,
     if (Result->GetReply == MCU_SEM_ACQUIRED) {
         if (Image != NULL) {
             Result->Stage = MT7922_MCU_PATCH;
-            status = DownloadRegion(Rings, Image, 0x00900000, MCU_PATCH_BYTES,
-                MCU_PATCH_START, Result);
+            ULONG offset = 0;
+            for (ULONG index = 0; index < Firmware->PatchRegionCount; ++index) {
+                const ULONG bytes = Firmware->PatchRegionBytes[index];
+                status = DownloadRegion(Rings, Image + offset, Firmware->PatchTargets[index],
+                    bytes, MCU_PATCH_START, Result);
+                if (!NT_SUCCESS(status)) {
+                    break;
+                }
+                offset += bytes;
+            }
             if (NT_SUCCESS(status)) {
                 ULONG reply;
                 const ULONG checkCrc = 0;
@@ -1442,10 +1754,13 @@ static NTSTATUS RunCommands(MCU_RINGS *Rings, const UCHAR *Image,
     }
 
     Result->Stage = MT7922_MCU_RAM;
-    ULONG offset = MCU_PATCH_BYTES;
-    for (ULONG index = 0; index < RTL_NUMBER_OF(firmwareTargets); ++index) {
-        const ULONG bytes = Firmware->RegionBytes[index];
-        status = DownloadRegion(Rings, Image + offset, firmwareTargets[index],
+    ULONG offset = 0;
+    for (ULONG index = 0; index < Firmware->PatchRegionCount; ++index) {
+        offset += Firmware->PatchRegionBytes[index];
+    }
+    for (ULONG index = 0; index < Firmware->RamRegionCount; ++index) {
+        const ULONG bytes = Firmware->RamRegionBytes[index];
+        status = DownloadRegion(Rings, Image + offset, Firmware->RamTargets[index],
             bytes, MCU_TARGET_ADDRESS_LEN, Result);
         if (!NT_SUCCESS(status)) {
             return status;
@@ -1454,15 +1769,25 @@ static NTSTATUS RunCommands(MCU_RINGS *Rings, const UCHAR *Image,
     }
 
     Result->Stage = MT7922_MCU_START;
-    const ULONG startArgs[] = {1, firmwareTargets[0]};
+    const ULONG startArgs[] = {1, Firmware->EntryAddress};
     ULONG reply;
     status = ExchangeMcu(Rings, MCU_FW_START, startArgs, RTL_NUMBER_OF(startArgs), &reply, Result);
     if (NT_SUCCESS(status)) {
-        status = WaitForFirmwareReady(Rings->Registers, Result);
+        status = WaitForFirmwareReady(Rings->Registers, Rings->ChipId, Result);
     }
     if (NT_SUCCESS(status)) {
         Result->Stage = MT7922_MCU_CAPABILITIES;
-        status = ExchangeMcu(Rings, MCU_NIC_CAPABILITIES, NULL, 0, &reply, Result);
+        if (Rings->ChipId == 0x7925) {
+            const UCHAR request[8] = {
+                0, 0, 0, 0,
+                MCU_UNI_CHIP_CONFIG_NIC_CAPA, 0,
+                4, 0
+            };
+            status = ExchangeUnifiedWait(Rings, MCU_UNI_CHIP_CONFIG, request,
+                sizeof(request), Result, 3000, false);
+        } else {
+            status = ExchangeMcu(Rings, MCU_NIC_CAPABILITIES, NULL, 0, &reply, Result);
+        }
     }
     return status;
 }
@@ -2498,20 +2823,20 @@ static void CheckIpv6Reply(MT7922_MCU_PROBE_INFO *Result, const MT7922_RX_FRAME 
     DeliverAmsduBody(Result, body, bodyBytes, selectedPeer, Ref, watch, 0, split);
 }
 
-static void CollectTxCompletion(const UCHAR *Data, ULONG Length, ULONG Type,
+static void CollectTxCompletion(USHORT ChipId, const UCHAR *Data, ULONG Length, ULONG Type,
     const MT7922_AWDL_TX *Request, MT7922_TX_ATTEMPT_INFO *Attempt)
 {
     if (Type == MT7922_TX_STATUS_PACKET_TYPE) {
         ++Attempt->TxStatusRecords;
         MT7922_TX_REPORT report;
-        if (Mt7922ReadTxReport(Data, Length, Request, &report) == Mt7922TxReportMatched) {
+        if (Mt792xReadTxReport(ChipId, Data, Length, Request, &report) == Mt7922TxReportMatched) {
             Attempt->ReportSeen = 1;
             Attempt->AckErrors = report.AckErrors;
             Attempt->ReportRate = report.RateCode;
         }
     } else if (Type == MT7922_TX_RELEASE_PACKET_TYPE) {
         MT7922_TX_RELEASE release;
-        if (Mt7922ReadTxRelease(Data, Length, Request->Token, &release) == Mt7922TxReportMatched) {
+        if (Mt792xReadTxRelease(ChipId, Data, Length, Request->Token, &release) == Mt7922TxReportMatched) {
             Attempt->ReleaseSeen = 1;
             Attempt->ReleaseStatus = release.Status;
             Attempt->RetryCount = release.Attempts;
@@ -2536,14 +2861,15 @@ static void ReadActionTxEvents(MT7922_RX_RING *Ring, const MT7922_AWDL_TX *Reque
             const ULONG type = length >= sizeof(ULONG)
                 ? ReadLittleEndian32(data) >> 27 : MT7922_TX_RX_TYPE_BINS;
             RecordRxRecord(Result, data, length, type);
-            CollectTxCompletion(data, length, type, Request, Attempt);
+            CollectTxCompletion(Ring->ChipId, data, length, type, Request, Attempt);
             if (SyncRef != NULL && SyncRef->Unicast.Active) {
-                CollectTxCompletion(data, length, type, &SyncRef->Unicast.Request,
+                CollectTxCompletion(Ring->ChipId, data, length, type, &SyncRef->Unicast.Request,
                     &SyncRef->Unicast.Completion);
             }
             if (SyncRef != NULL && type == 2) {
                 MT7922_RX_FRAME frame;
-                const MT7922_RX_STATUS frameStatus = Mt7922DecodeRx(data, length, &frame);
+                const MT7922_RX_STATUS frameStatus = Mt792xDecodeRx((USHORT)Ring->ChipId,
+                    data, length, &frame);
                 if (frameStatus != Mt7922RxRawFrame) {
                     ++Result->NormalRxSkipped;
                     Result->NormalRxFcsErrors += (frame.SkipFlags & MT7922_RX_SKIP_FCS) != 0;
@@ -2637,6 +2963,14 @@ static void ReadActionTxEvents(MT7922_RX_RING *Ring, const MT7922_AWDL_TX *Reque
     }
 }
 
+static BOOLEAN BuildAwdlTxwiForChip(UCHAR *Txwi, const MT7922_AWDL_TX *Request,
+    const UCHAR *Frame, ULONG FrameBytes, ULONG ChipId)
+{
+    MT7922_AWDL_TX chipRequest = *Request;
+    chipRequest.ChipId = (USHORT)ChipId;
+    return (BOOLEAN)Mt7922BuildAwdlTxwi(Txwi, &chipRequest, Frame, FrameBytes);
+}
+
 static NTSTATUS SendProbeFrame(MCU_RINGS *Rings, AWDL_PROBE_FRAME *Probe,
     MT7922_MCU_PROBE_INFO *Result, ULONG Index)
 {
@@ -2647,7 +2981,7 @@ static NTSTATUS SendProbeFrame(MCU_RINGS *Rings, AWDL_PROBE_FRAME *Probe,
     UCHAR txwi[MT7922_TXWI_BYTES];
     Probe->Bytes[22] = (UCHAR)((Index + 1) << 4);
     Result->Stage = MT7922_MCU_TX_SUBMIT;
-    if (!Mt7922BuildAwdlTxwi(txwi, &request, Probe->Bytes, Probe->Length)) {
+    if (!BuildAwdlTxwiForChip(txwi, &request, Probe->Bytes, Probe->Length, Rings->ChipId)) {
         return STATUS_DATA_ERROR;
     }
     RtlCopyMemory(Rings->Buffer + ACTION_FRAME_OFFSET, Probe->Bytes, Probe->Length);
@@ -2716,7 +3050,7 @@ static NTSTATUS SendSyncFrame(MCU_RINGS *Rings, MT7922_MCU_PROBE_INFO *Result,
         (UCHAR)(ACTION_PACKET_ID + (Token & 1U)), 0, 1, Rings->AwdlTxRateCode
     };
     UCHAR txwi[MT7922_TXWI_BYTES];
-    if (!Mt7922BuildAwdlTxwi(txwi, &request, Frame, FrameBytes)) {
+    if (!BuildAwdlTxwiForChip(txwi, &request, Frame, FrameBytes, Rings->ChipId)) {
         return STATUS_DATA_ERROR;
     }
     RtlCopyMemory(Rings->Buffer + ACTION_FRAME_OFFSET, Frame, FrameBytes);
@@ -3097,7 +3431,7 @@ static NTSTATUS SubmitUnicast(MCU_RINGS *Rings, MT7922_MCU_PROBE_INFO *Result,
         RateCode == 0 ? Rings->AwdlTxRateCode : RateCode
     };
     UCHAR txwi[MT7922_TXWI_BYTES];
-    if (!Mt7922BuildAwdlTxwi(txwi, &request, Frame, FrameBytes)) {
+    if (!BuildAwdlTxwiForChip(txwi, &request, Frame, FrameBytes, Rings->ChipId)) {
         return STATUS_DATA_ERROR;
     }
 
@@ -3747,8 +4081,28 @@ static NTSTATUS InitializeRadioMac(MCU_RINGS *Rings, MT7922_MCU_PROBE_INFO *Resu
     const ULONG macEnable = 1; /* Enable band 0 without creating a BSS. */
     ULONG reply;
     Result->Stage = MT7922_MCU_RECEIVE_EFUSE;
-    NTSTATUS status = ExchangeMcu(Rings, MCU_EXTENDED | (MCU_EXT_EFUSE << 8),
-        &efuseMode, 1, &reply, Result);
+    NTSTATUS status;
+    if (Rings->ChipId == MT7925_CHIP_ID) {
+        /* Connac3 exposes the complete eFuse image through the unified buffer API. */
+        const UCHAR request[12] = {
+            0, 0, 0, 0,
+            MCU_UNI_EFUSE_BUFFER_MODE, 0,
+            8, 0,
+            0, /* EE_MODE_EFUSE */
+            1, /* EE_FORMAT_WHOLE */
+            0, 0 /* Firmware chooses the full image length. */
+        };
+        status = ExchangeUnifiedWait(Rings, MCU_UNI_EFUSE_CTRL, request,
+            sizeof(request), Result, 3000, false);
+        if (NT_SUCCESS(status)) {
+            /* Connac3 uses direct MAC setup; the legacy MCU MAC_INIT is 7922-only. */
+            ProgramMt7925BasicRates(Rings->Registers);
+            return STATUS_SUCCESS;
+        }
+    } else {
+        status = ExchangeMcu(Rings, MCU_EXTENDED | (MCU_EXT_EFUSE << 8),
+            &efuseMode, 1, &reply, Result);
+    }
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -3848,11 +4202,12 @@ static NTSTATUS RunAwdlReceive(MCU_RINGS *Rings, MT7922_MCU_PROBE_INFO *Result)
     return ExchangeUnified(Rings, MCU_SNIFFER, enable, sizeof(enable), Result);
 }
 
-static NTSTATUS VerifyFirmwareImage(const UCHAR *Image, SIZE_T Length, const MCU_FIRMWARE **Firmware)
+static NTSTATUS VerifyFirmwareImage(const UCHAR *Image, SIZE_T Length, ULONG ChipId,
+    const MCU_FIRMWARE **Firmware)
 {
     for (ULONG i = 0; i < RTL_NUMBER_OF(acceptedFirmware); ++i) {
         const MCU_FIRMWARE *profile = &acceptedFirmware[i];
-        if (Length != profile->Bytes) {
+        if (ChipId != profile->ChipId || Length != profile->Bytes) {
             continue;
         }
         UCHAR digest[sizeof(profile->Sha256)];
@@ -3870,7 +4225,7 @@ static NTSTATUS VerifyFirmwareImage(const UCHAR *Image, SIZE_T Length, const MCU
     return STATUS_INVALID_BUFFER_SIZE;
 }
 
-static void ClearProgrammedRings(PUCHAR Window, BOOLEAN ReceiveAwdl, BOOLEAN transmitAwdl)
+static void ClearProgrammedRings(PUCHAR Window, ULONG ChipId, BOOLEAN ReceiveAwdl, BOOLEAN transmitAwdl)
 {
     if (transmitAwdl) {
         WriteRegister(Window, TX_ACTION_RING + RING_COUNT, 0);
@@ -3882,18 +4237,21 @@ static void ClearProgrammedRings(PUCHAR Window, BOOLEAN ReceiveAwdl, BOOLEAN tra
         WriteRegister(Window, RX_DATA_RING + RING_BASE, 0);
         WriteRegister(Window, RX_DATA_RING + RING_CPU, 0);
     }
-    WriteRegister(Window, TX_MCU_RING + RING_COUNT, 0);
-    WriteRegister(Window, TX_MCU_RING + RING_BASE, 0);
-    WriteRegister(Window, TX_MCU_RING + RING_CPU, 0);
+    const ULONG mcuTxRing = McuTxRingRegister(ChipId);
+    WriteRegister(Window, mcuTxRing + RING_COUNT, 0);
+    WriteRegister(Window, mcuTxRing + RING_BASE, 0);
+    WriteRegister(Window, mcuTxRing + RING_CPU, 0);
     WriteRegister(Window, TX_FWDL_RING + RING_COUNT, 0);
     WriteRegister(Window, TX_FWDL_RING + RING_BASE, 0);
     WriteRegister(Window, TX_FWDL_RING + RING_CPU, 0);
     WriteRegister(Window, RX_MCU_RING + RING_COUNT, 0);
     WriteRegister(Window, RX_MCU_RING + RING_BASE, 0);
     WriteRegister(Window, RX_MCU_RING + RING_CPU, 0);
-    WriteRegister(Window, RX_RUNTIME_RING + RING_COUNT, 0);
-    WriteRegister(Window, RX_RUNTIME_RING + RING_BASE, 0);
-    WriteRegister(Window, RX_RUNTIME_RING + RING_CPU, 0);
+    if (ChipId != 0x7925) {
+        WriteRegister(Window, RX_RUNTIME_RING + RING_COUNT, 0);
+        WriteRegister(Window, RX_RUNTIME_RING + RING_BASE, 0);
+        WriteRegister(Window, RX_RUNTIME_RING + RING_CPU, 0);
+    }
 }
 
 static NTSTATUS AllocateMcuRings(MCU_RINGS *Rings, WDFDMAENABLER DmaEnabler,
@@ -3917,7 +4275,8 @@ static NTSTATUS AllocateMcuRings(MCU_RINGS *Rings, WDFDMAENABLER DmaEnabler,
         return status;
     }
 
-    Rings->ControlTx = (TX_RING){TX_MCU_RING, 0, TX_PAYLOAD_OFFSET, TX_DESCRIPTOR_COUNT, 0};
+    Rings->ControlTx = (TX_RING){McuTxRingRegister(Rings->ChipId), 0, TX_PAYLOAD_OFFSET,
+        TX_DESCRIPTOR_COUNT, 0};
     Rings->DownloadTx = (TX_RING){TX_FWDL_RING, FWDL_RING_OFFSET, TX_PAYLOAD_OFFSET, FWDL_DESCRIPTOR_COUNT, 0};
     if (TransmitRaw) {
         const ULONG count = StationTxBuffers ? STATION_ACTION_COUNT : TX_ACTION_COUNT;
@@ -3934,8 +4293,10 @@ static NTSTATUS AllocateMcuRings(MCU_RINGS *Rings, WDFDMAENABLER DmaEnabler,
     Rings->DmaAddress = address.LowPart;
     AssignRxRing(Rings, &Rings->RomEvents, RX_MCU_RING, RX_RING_OFFSET,
         RX_PAYLOAD_OFFSET, RX_DESCRIPTOR_COUNT);
-    AssignRxRing(Rings, &Rings->RuntimeEvents, RX_RUNTIME_RING, RX_RUNTIME_OFFSET,
-        RX_RUNTIME_PAYLOAD, RX_DESCRIPTOR_COUNT);
+    if (Rings->ChipId != 0x7925) {
+        AssignRxRing(Rings, &Rings->RuntimeEvents, RX_RUNTIME_RING, RX_RUNTIME_OFFSET,
+            RX_RUNTIME_PAYLOAD, RX_DESCRIPTOR_COUNT);
+    }
     if (ReceiveData) {
         AssignRxRing(Rings, &Rings->DataRx, RX_DATA_RING, DATA_RING_OFFSET,
             DATA_PAYLOAD_OFFSET, DATA_DESCRIPTOR_COUNT);
@@ -3954,11 +4315,11 @@ static NTSTATUS BootMcuRings(MCU_RINGS *Rings, const UCHAR *Image, SIZE_T ImageB
     NTSTATUS status = RequireIdleDma(window, Result);
     if (NT_SUCCESS(status)) {
         Result->Stage = MT7922_MCU_RESET;
-        status = ResetWireless(window, &Result->ResetRegister);
+        status = ResetWireless(window, Rings->ChipId, &Result->ResetRegister);
     }
     if (NT_SUCCESS(status)) {
         Result->Stage = MT7922_MCU_BOOT_ROM;
-        status = ReadBootRomState(window, &Result->BootRomState);
+        status = ReadBootRomState(window, Rings->ChipId, &Result->BootRomState);
     }
 
     if (NT_SUCCESS(status)) {
@@ -3973,11 +4334,14 @@ static NTSTATUS BootMcuRings(MCU_RINGS *Rings, const UCHAR *Image, SIZE_T ImageB
         if (NT_SUCCESS(status)) {
             status = RunCommands(Rings, Image, Firmware, Result);
         }
+        if (NT_SUCCESS(status) && Rings->ChipId == 0x7925) {
+            ProgramMt7925BasicRates(window);
+        }
     }
     return status;
 }
 
-NTSTATUS Mt7922RunMcuProbe(PUCHAR Window, WDFDMAENABLER DmaEnabler,
+NTSTATUS Mt7922RunMcuProbe(PUCHAR Window, ULONG ChipId, WDFDMAENABLER DmaEnabler,
     WDFCOMMONBUFFER *RetainedBuffer, const UCHAR *Image, SIZE_T ImageBytes,
     BOOLEAN ReceiveAwdl, UCHAR TransmitChannel, BOOLEAN Wide80, const UCHAR *TargetPeer, USHORT TcpPort, USHORT RateCode,
     MT7922_AWDL_LINK *Link, MT7922_AWDL_WATCH *Watch, MT7922_MCU_PROBE_INFO *Result)
@@ -3996,7 +4360,7 @@ NTSTATUS Mt7922RunMcuProbe(PUCHAR Window, WDFDMAENABLER DmaEnabler,
     const MCU_FIRMWARE *firmware = NULL;
     if (Image != NULL) {
         Result->Stage = MT7922_MCU_VALIDATE_IMAGE;
-        NTSTATUS verified = VerifyFirmwareImage(Image, ImageBytes, &firmware);
+        NTSTATUS verified = VerifyFirmwareImage(Image, ImageBytes, ChipId, &firmware);
         if (!NT_SUCCESS(verified)) {
             return verified;
         }
@@ -4004,6 +4368,7 @@ NTSTATUS Mt7922RunMcuProbe(PUCHAR Window, WDFDMAENABLER DmaEnabler,
 
     MCU_RINGS rings = {0};
     rings.Registers = Window;
+    rings.ChipId = ChipId;
     rings.AwdlTxChannel = TransmitChannel;
     rings.AwdlTxRateCode = RateCode;
     rings.AwdlWide80 = Wide80;
@@ -4023,10 +4388,11 @@ NTSTATUS Mt7922RunMcuProbe(PUCHAR Window, WDFDMAENABLER DmaEnabler,
 
     if (rings.Programmed) {
         Result->DmaConfig = ReadRegister(Window, DMA_GLOBAL);
-        Result->TxDmaIndex = ReadRegister(Window, TX_MCU_RING + RING_DEVICE);
+        Result->TxDmaIndex = ReadRegister(Window, McuTxRingRegister(ChipId) + RING_DEVICE);
         Result->DownloadDmaIndex = ReadRegister(Window, TX_FWDL_RING + RING_DEVICE);
         Result->RxDmaIndex = ReadRegister(Window, RX_MCU_RING + RING_DEVICE);
-        Result->RuntimeRxDmaIndex = ReadRegister(Window, RX_RUNTIME_RING + RING_DEVICE);
+        Result->RuntimeRxDmaIndex = ChipId == 0x7925
+            ? MAXULONG : ReadRegister(Window, RX_RUNTIME_RING + RING_DEVICE);
         if (ReceiveAwdl) {
             Result->DataRxDmaIndex = ReadRegister(Window, RX_DATA_RING + RING_DEVICE);
         }
@@ -4040,14 +4406,14 @@ NTSTATUS Mt7922RunMcuProbe(PUCHAR Window, WDFDMAENABLER DmaEnabler,
             *RetainedBuffer = buffer;
             return NT_SUCCESS(status) ? stopStatus : status;
         }
-        ClearProgrammedRings(Window, ReceiveAwdl, transmitAwdl);
+        ClearProgrammedRings(Window, rings.ChipId, ReceiveAwdl, transmitAwdl);
         if (rings.RestorePciePower) {
             WriteRegister(Window, PCIE_MAC_PM, rings.SavedPciePower);
         }
         if (Image != NULL || (Result->GetReply != MCU_PATCH_PRESENT &&
             Result->ReleaseReply != MCU_SEM_RELEASED && rings.ControlTx.Producer != 0)) {
             ULONG resetRegister;
-            Result->CleanupStatus = (ULONG)ResetWireless(Window, &resetRegister);
+            Result->CleanupStatus = (ULONG)ResetWireless(Window, rings.ChipId, &resetRegister);
         }
     }
     WdfObjectDelete(buffer);
@@ -4098,14 +4464,14 @@ NTSTATUS Mt7922McuStopStation(MT7922_MCU_STATION *Station)
         if (!NT_SUCCESS(status)) {
             return status; /* The device can still access DMA memory. */
         }
-        ClearProgrammedRings(rings->Registers, TRUE, TRUE);
+        ClearProgrammedRings(rings->Registers, rings->ChipId, TRUE, TRUE);
     }
     if (rings->RestorePciePower) {
         WriteRegister(rings->Registers, PCIE_MAC_PM, rings->SavedPciePower);
     }
     if (Station->PairwiseKeyInstalled || Station->GroupKeyInstalled || Station->KeyStateInvalid) {
         ULONG resetRegister;
-        status = ResetWireless(rings->Registers, &resetRegister);
+        status = ResetWireless(rings->Registers, rings->ChipId, &resetRegister);
         Station->Info.CleanupStatus = (ULONG)status;
     }
     Station->KeyStateInvalid = false;
@@ -4130,6 +4496,10 @@ NTSTATUS Mt7922McuDisableStationMac(MT7922_MCU_STATION *Station)
 {
     if (!Station->Ready || Station->AssociationId != 0) {
         return STATUS_INVALID_DEVICE_STATE;
+    }
+    if (Station->Scan.Rings->ChipId == MT7925_CHIP_ID) {
+        /* StopStation tears down the Connac3 transport; the legacy command is 7922-only. */
+        return STATUS_SUCCESS;
     }
     const ULONG disable = 0; /* mt76_connac_mcu_set_mac_enable: disable band 0. */
     ULONG reply;
@@ -4207,20 +4577,21 @@ static NTSTATUS ConfigureStationRadio(MT7922_MCU_STATION *Station,
     const MT7922_STATION_RADIO_PROFILE *Profile);
 
 NTSTATUS Mt7922McuStartStation(MT7922_MCU_STATION *Station, PUCHAR Window,
-    WDFDMAENABLER DmaEnabler, const UCHAR *Image, SIZE_T ImageBytes, uint16_t MulticastWcid,
+    ULONG ChipId, WDFDMAENABLER DmaEnabler, const UCHAR *Image, SIZE_T ImageBytes, uint16_t MulticastWcid,
     const MT7922_STATION_RADIO_PROFILE *Profile, const UCHAR *Clc, SIZE_T ClcBytes)
 {
     if (Station->Scan.Rings != NULL) {
         return STATUS_DEVICE_BUSY;
     }
-    if (Window == NULL || DmaEnabler == NULL || Image == NULL || MulticastWcid == 0 ||
+    if ((ChipId != MT7922_CHIP_ID && ChipId != MT7925_CHIP_ID) ||
+        Window == NULL || DmaEnabler == NULL || Image == NULL || MulticastWcid == 0 ||
         MulticastWcid == STATION_SHARED_BA_WCID ||
         MulticastWcid > 255 || !Mt7922ValidateStationRadio(Profile) ||
         (Clc == NULL) != (ClcBytes == 0)) {
         return STATUS_INVALID_PARAMETER;
     }
     const MCU_FIRMWARE *firmware;
-    NTSTATUS status = VerifyFirmwareImage(Image, ImageBytes, &firmware);
+    NTSTATUS status = VerifyFirmwareImage(Image, ImageBytes, ChipId, &firmware);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -4230,13 +4601,18 @@ NTSTATUS Mt7922McuStartStation(MT7922_MCU_STATION *Station, PUCHAR Window,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     rings->Registers = Window;
+    rings->ChipId = ChipId;
     RtlZeroMemory(&Station->Info, sizeof(Station->Info));
     status = AllocateMcuRings(rings, DmaEnabler, TRUE, TRUE, TRUE, &Station->Buffer, &Station->Info);
     if (!NT_SUCCESS(status)) {
         ExFreePoolWithTag(rings, 'PctM');
         return status;
     }
-    Station->Scan = (MT7922_MCU_SCAN_TRANSPORT){.Rings = rings, .Result = &Station->Info};
+    Station->Scan = (MT7922_MCU_SCAN_TRANSPORT){
+        .Rings = rings,
+        .Result = &Station->Info,
+        .ChipId = (USHORT)rings->ChipId
+    };
     rings->StationDataDebug = &Station->ConnectDebug.Data;
     rings->StationIoDebug = &Station->ConnectDebug.StationIo;
     rings->StationIoTraceDeadline = &Station->StationIoTraceDeadline;
@@ -4275,24 +4651,38 @@ static NTSTATUS ConfigureStationRadio(MT7922_MCU_STATION *Station,
 
     MCU_RINGS *rings = Station->Scan.Rings;
     uint8_t payload[MT7922_STATION_POWER_BYTES];
-    size_t bytes = Mt7922BuildStationDomain(payload, Profile);
-    NTSTATUS status = SendStationRadioCommand(rings, MCU_CE_CHANNEL_DOMAIN, MCU_SET_QUERY_SET,
-        payload, bytes, false, &Station->Info);
-    if (NT_SUCCESS(status)) {
-        Mt7922BuildStationChannel(payload, Profile->Channels[0].Number, 0,
-            (uint8_t)Station->Info.NicSpatialStreams, true);
-        status = SendStationRadioCommand(rings, MCU_EXTENDED | (MCU_EXT_SET_RX_PATH << 8), MCU_SET_QUERY_SET,
-            payload, MT7922_STATION_CHANNEL_BYTES, true, &Station->Info);
-    }
-    for (size_t first = 0; NT_SUCCESS(status) && first < Profile->ChannelCount; first += MT7922_STATION_POWER_BATCH) {
-        bytes = Mt7922BuildStationPower(payload, Profile, first);
-        status = SendStationRadioCommand(rings, MCU_CE_RATE_TX_POWER, MCU_SET_QUERY_SET,
+    NTSTATUS status;
+    if (rings->ChipId == MT7925_CHIP_ID) {
+        uint8_t domain[MT7925_STATION_DOMAIN_HEADER + MT7925_STATION_DOMAIN_ENTRY * MT7922_STATION_RADIO_CHANNELS];
+        const size_t bytes = Mt7925BuildStationDomain(domain, Profile);
+        status = ExchangeUnifiedWait(rings, MCU_UNI_SET_DOMAIN_INFO, domain,
+            (ULONG)bytes, &Station->Info, 3000, false);
+        uint8_t power[MT7925_STATION_POWER_BYTES];
+        for (size_t first = 0; NT_SUCCESS(status) && first < Profile->ChannelCount; first += MT7925_STATION_POWER_BATCH) {
+            const size_t powerBytes = Mt7925BuildStationPower(power, Profile, first);
+            status = ExchangeUnifiedWait(rings, MCU_UNI_SET_POWER_LIMIT, power,
+                (ULONG)powerBytes, &Station->Info, 3000, false);
+        }
+    } else {
+        size_t bytes = Mt7922BuildStationDomain(payload, Profile);
+        status = SendStationRadioCommand(rings, MCU_CE_CHANNEL_DOMAIN, MCU_SET_QUERY_SET,
             payload, bytes, false, &Station->Info);
         if (NT_SUCCESS(status)) {
-            const ULONG readPse[2] = {MCU_REG_PSE_BASE, 0};
-            /* mt76 reads PSE between batches to pace firmware buffer usage. */
-            status = SendStationRadioCommand(rings, MCU_CE_REG_READ, MCU_SET_QUERY_READ,
-                (const uint8_t *)readPse, sizeof(readPse), true, &Station->Info);
+            Mt7922BuildStationChannel(payload, Profile->Channels[0].Number, 0,
+                (uint8_t)Station->Info.NicSpatialStreams, true);
+            status = SendStationRadioCommand(rings, MCU_EXTENDED | (MCU_EXT_SET_RX_PATH << 8), MCU_SET_QUERY_SET,
+                payload, MT7922_STATION_CHANNEL_BYTES, true, &Station->Info);
+        }
+        for (size_t first = 0; NT_SUCCESS(status) && first < Profile->ChannelCount; first += MT7922_STATION_POWER_BATCH) {
+            bytes = Mt7922BuildStationPower(payload, Profile, first);
+            status = SendStationRadioCommand(rings, MCU_CE_RATE_TX_POWER, MCU_SET_QUERY_SET,
+                payload, bytes, false, &Station->Info);
+            if (NT_SUCCESS(status)) {
+                const ULONG readPse[2] = {MCU_REG_PSE_BASE, 0};
+                /* mt76 reads PSE between batches to pace firmware buffer usage. */
+                status = SendStationRadioCommand(rings, MCU_CE_REG_READ, MCU_SET_QUERY_READ,
+                    (const uint8_t *)readPse, sizeof(readPse), true, &Station->Info);
+            }
         }
     }
     if (NT_SUCCESS(status)) {
@@ -4327,17 +4717,26 @@ NTSTATUS Mt7922McuPrepareStationAp(MT7922_MCU_STATION *Station, const MT7922_STA
         return STATUS_INVALID_PARAMETER;
     }
     MCU_RINGS *rings = Station->Scan.Rings;
+    if (rings->ChipId == MT7925_CHIP_ID) {
+        /* Connac3 RLM uses band 2 for 5 GHz and stream counts, not chain masks. */
+        bss[32] = 3; /* PHY_TYPE_OFDM_INDEX. */
+        rlm[13] = chains == 3 ? 2 : 1;
+        rlm[17] = 2;
+    }
     if (rings->StationTxPending || rings->StationDataInFlight != 0) {
         return STATUS_DEVICE_BUSY;
     }
     Station->Ap.Band = 0;
-    uint8_t channel[MT7922_STATION_CHANNEL_BYTES];
-    Mt7922BuildStationChannel(channel, selected.Channel, selected.Center80,
-        (uint8_t)Station->Info.NicSpatialStreams, false);
-    NTSTATUS status = SendStationRadioCommand(rings, MCU_EXTENDED | (MCU_EXT_CHANNEL_SWITCH << 8),
-        MCU_SET_QUERY_SET, channel, sizeof(channel), true, &Station->Info);
-    if (!NT_SUCCESS(status)) {
-        return status;
+    NTSTATUS status = STATUS_SUCCESS;
+    if (rings->ChipId != MT7925_CHIP_ID) {
+        uint8_t channel[MT7922_STATION_CHANNEL_BYTES];
+        Mt7922BuildStationChannel(channel, selected.Channel, selected.Center80,
+            (uint8_t)Station->Info.NicSpatialStreams, false);
+        status = SendStationRadioCommand(rings, MCU_EXTENDED | (MCU_EXT_CHANNEL_SWITCH << 8),
+            MCU_SET_QUERY_SET, channel, sizeof(channel), true, &Station->Info);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
     }
     status = ExchangeUnified(rings, MCU_BSS_INFO, bss, sizeof(bss), &Station->Info);
     if (NT_SUCCESS(status)) {
@@ -4409,7 +4808,7 @@ NTSTATUS Mt7922McuStopStationObserver(MT7922_MCU_STATION *Station)
 static void CheckSharedAmsduRecord(MT7922_MCU_STATION *Station, const UCHAR *Record, size_t Length)
 {
     MT7922_RX_FRAME frame;
-    if (Mt7922DecodeRx(Record, Length, &frame) != Mt7922RxRawFrame || frame.Length < 26 ||
+    if (Mt792xDecodeRx((USHORT)Station->Scan.Rings->ChipId, Record, Length, &frame) != Mt7922RxRawFrame || frame.Length < 26 ||
         frame.Bytes[0] != 0x88 || (frame.Bytes[1] & 0x47U) != 0 ||
         (frame.Bytes[24] & 0x0fU) != Station->SharedLink->ReorderTid ||
         (frame.AmsduPart == 0 && (frame.Bytes[24] & 0x80U) == 0) ||
@@ -4510,7 +4909,8 @@ static MT7922_RX_STATUS DecodeStationRx(MT7922_MCU_STATION *Station, const uint8
 {
     MT7922_EAPOL_DEBUG *debug = &Station->ConnectDebug.Eapol;
     ++debug->RxRecords;
-    const MT7922_RX_STATUS status = Mt7922DecodeRx(Record, Bytes, Frame);
+    const MT7922_RX_STATUS status = Mt792xDecodeRx((USHORT)Station->Scan.Rings->ChipId,
+        Record, Bytes, Frame);
     if (status == Mt7922RxRawFrame) {
         ++debug->RxRaw;
         if (Frame->Length >= 24 && (Frame->Bytes[0] & 0x0cU) == 0x08U &&
@@ -4619,10 +5019,11 @@ static NTSTATUS SubmitStationFrame(MT7922_MCU_STATION *Station, const uint8_t *F
     if (token >= STATION_SHARED_TOKEN && token < STATION_DATA_TX_TOKEN_END) {
         token = (USHORT)STATION_DATA_TX_TOKEN_END;
     }
-    const MT7922_AWDL_TX tx = {
+    MT7922_AWDL_TX tx = {
         rings->DmaAddress + ACTION_FRAME_OFFSET, Wcid, token,
         (UCHAR)(ACTION_PACKET_ID + token % 253U), 0, 3, MT7922_OFDM_6_MBPS
     };
+    tx.ChipId = (USHORT)rings->ChipId;
     UCHAR txwi[MT7922_TXWI_BYTES];
     const int valid = Data ? Mt7922BuildStationDataTxwi(txwi, &tx, Frame, Bytes) :
         Mt7922BuildStationMgmtTxwi(txwi, &tx, Frame, Bytes);
@@ -4957,11 +5358,12 @@ static NTSTATUS SubmitStationDataFrame(MT7922_MCU_STATION *Station, const UCHAR 
         return STATUS_DEVICE_BUSY;
     }
     const ULONG offset = STATION_DATA_TX_OFFSET + i * UNICAST_TX_STRIDE;
-    const MT7922_AWDL_TX tx = {
+    MT7922_AWDL_TX tx = {
         rings->DmaAddress + offset + MT7922_TXWI_BYTES, Station->PeerWcid,
         (USHORT)(STATION_DATA_TX_TOKEN_BASE + i), (UCHAR)(STATION_DATA_TX_PID_BASE + i),
         0, 3, MT7922_OFDM_6_MBPS
     };
+    tx.ChipId = (USHORT)rings->ChipId;
     UCHAR txwi[MT7922_TXWI_BYTES];
     if (!Mt7922BuildStationDataTxwi(txwi, &tx, Frame, Bytes)) {
         return STATUS_INVALID_PARAMETER;
@@ -5418,6 +5820,7 @@ static bool BuildStationSharedTxwi(MT7922_MCU_STATION *Station, UCHAR *Txwi,
     UCHAR *Frame, size_t Bytes, ULONG Offset, MT7922_AWDL_TX *Tx)
 {
     MCU_RINGS *rings = Station->Scan.Rings;
+    Tx->ChipId = (USHORT)rings->ChipId;
     USHORT *sequenceCounter = Tx->Ampdu ? &Station->SharedLink->UploadBa.NextSequence : &rings->StationSequence;
     const USHORT sequence = (USHORT)((*sequenceCounter + 1U) & 0xfffU);
     WriteLittleEndian16(Frame + 22, (USHORT)(sequence << 4));
@@ -5430,7 +5833,7 @@ static bool BuildStationSharedTxwi(MT7922_MCU_STATION *Station, UCHAR *Txwi,
     if (Tx->Wcid == STATION_SHARED_BA_WCID) {
         Tx->OwnMacIndex = Station->SharedBaPort;
     }
-    if (!Mt7922BuildAwdlTxwi(Txwi, Tx, Frame, Bytes)) {
+    if (!BuildAwdlTxwiForChip(Txwi, Tx, Frame, (ULONG)Bytes, rings->ChipId)) {
         return false;
     }
     *sequenceCounter = sequence;

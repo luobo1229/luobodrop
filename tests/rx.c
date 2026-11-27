@@ -477,6 +477,56 @@ static void CheckTransmitFormat(void)
     assert(!Mt7922BuildAwdlTxwi(txwi, &request, frame, sizeof(frame)));
 }
 
+static void CheckConnac3TransmitFormat(void)
+{
+    uint8_t frame[40] = {
+        0xd0, 0, 0, 0, 0x02, 0, 0, 0, 0, 2,
+        0x02, 0, 0, 0, 0, 1, 0x00, 0x25, 0x00, 0xff, 0x94, 0x73, 0x30, 0x12,
+        0x7f, 0, 0x17, 0xf2, 8, 0x10, 0, 0
+    };
+    uint8_t txwi[MT7922_TXWI_BYTES];
+    MT7922_AWDL_TX request = {
+        0x01234560, 0x102, 0x17, 0x43, 2, 1, MT7922_OFDM_6_MBPS, 0, 0, 0x7925
+    };
+
+    assert(Mt7922BuildAwdlTxwi(txwi, &request, frame, sizeof(frame)));
+    const uint32_t expected[] = {
+        0x20000048, 0x840c8102, 0x0000000d, 0x91237800,
+        0, 0x00000443, 0x00120014, 0,
+        0x00008017, 0, 0x01234560, 0x00008028, 0, 0, 0, 0
+    };
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+        assert(ReadLe32(txwi + i * 4U) == expected[i]);
+    }
+
+    frame[4] = 0xff;
+    assert(Mt7922BuildAwdlTxwi(txwi, &request, frame, sizeof(frame)));
+    assert(ReadLe32(txwi + 12) == 0x91237811);
+
+    frame[4] = 0x02;
+    frame[0] = 0x88;
+    frame[24] = 5;
+    request.RateCode = MT7922_OFDM_12_MBPS;
+    assert(Mt7922BuildAwdlTxwi(txwi, &request, frame, sizeof(frame)));
+    assert(ReadLe32(txwi + 4) == 0x84ad8102);
+    assert(ReadLe32(txwi + 8) == 0x00000028);
+    assert(ReadLe32(txwi + 24) == 0x00140014);
+
+    request.RateCode = 0;
+    request.Ampdu = 1;
+    assert(Mt7922BuildAwdlTxwi(txwi, &request, frame, sizeof(frame)));
+    assert(ReadLe32(txwi + 4) == 0x04ad8102);
+    assert(ReadLe32(txwi + 12) == 0x81237800);
+    assert(ReadLe32(txwi + 24) == 0x00000014);
+
+    request.Ampdu = 0;
+    request.RateCode = 0x1234;
+    assert(!Mt7922BuildAwdlTxwi(txwi, &request, frame, sizeof(frame)));
+    request.RateCode = MT7922_OFDM_6_MBPS;
+    request.ChipId = 0x7927;
+    assert(!Mt7922BuildAwdlTxwi(txwi, &request, frame, sizeof(frame)));
+}
+
 static void CheckTransmitReports(void)
 {
     uint8_t data[72] = {0};
@@ -715,6 +765,7 @@ int wmain(int argc, wchar_t **argv)
     CheckQueueBoundaries();
     CheckPureUploadAck();
     CheckTransmitFormat();
+    CheckConnac3TransmitFormat();
     CheckTransmitAmsdu();
     CheckTransmitReports();
     wprintf(L"RX queue, TX descriptors, ACK reports and TX token release checks passed.\n");

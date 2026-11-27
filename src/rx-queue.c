@@ -81,7 +81,7 @@ MT7922_AWDL_RX_STATUS Mt7922PollAwdlRx(MT7922_RX_RING *Ring,
         && (control & (DESCRIPTOR_DROP | DESCRIPTOR_TO_HOST_A)) == 0) {
         MT7922_RX_FRAME frame = {0};
         MT7922_RX_STATUS status = length > RX_BUFFER_BYTES
-            ? Mt7922RxMalformed : Mt7922DecodeRx(data, length, &frame);
+            ? Mt7922RxMalformed : Mt792xDecodeRx(Ring->ChipId, data, length, &frame);
         if (status == Mt7922RxMalformed) {
             result = Mt7922AwdlRxInvalid;
         } else if (status == Mt7922RxRawFrame) {

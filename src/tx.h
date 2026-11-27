@@ -26,6 +26,7 @@ typedef struct _MT7922_AWDL_TX {
     uint16_t RateCode;
     uint8_t SpeIndex;
     uint8_t Ampdu;
+    uint16_t ChipId; /* 0/0x7922 selects Connac2; 0x7925 selects Connac3. */
 } MT7922_AWDL_TX;
 
 typedef enum _MT7922_TX_REPORT_RESULT {
@@ -47,7 +48,8 @@ typedef struct _MT7922_TX_RELEASE {
     uint8_t Status;
 } MT7922_TX_RELEASE;
 
-/* Build a Connac2 TXD and one-buffer TXP. The caller owns the DMA frame
+/* Build a chip-specific TXD and one-buffer TXP. ChipId 0 preserves the
+   original MT7922 builder for existing callers. The caller owns the DMA frame
    until the TX token is released by the device or the DMA engine is stopped. */
 int Mt7922BuildAwdlTxwi(uint8_t *Txwi, const MT7922_AWDL_TX *Request,
     const uint8_t *Frame, size_t FrameBytes);
@@ -59,6 +61,10 @@ MT7922_TX_REPORT_RESULT Mt7922ReadTxReport(const uint8_t *Data, size_t Length,
     const MT7922_AWDL_TX *Request, MT7922_TX_REPORT *Report);
 MT7922_TX_REPORT_RESULT Mt7922ReadTxRelease(const uint8_t *Data, size_t Length,
     uint16_t Token, MT7922_TX_RELEASE *Release);
+MT7922_TX_REPORT_RESULT Mt792xReadTxReport(uint16_t ChipId, const uint8_t *Data,
+    size_t Length, const MT7922_AWDL_TX *Request, MT7922_TX_REPORT *Report);
+MT7922_TX_REPORT_RESULT Mt792xReadTxRelease(uint16_t ChipId, const uint8_t *Data,
+    size_t Length, uint16_t Token, MT7922_TX_RELEASE *Release);
 
 size_t AwdlBuildProbePsf(uint8_t *Frame, size_t Capacity, const uint8_t *Source,
     const AWDL_ACTION *Peer, uint32_t Timestamp, uint8_t Channel);

@@ -1,5 +1,7 @@
 # LuoboDrop
 
+> **MT7925 实验性适配说明：** 本源码包含 MT7925 适配，但目前只完成编译和固件无关检查。Windows 拒绝了本地测试签名证书，驱动尚未在 MT7925 实机加载验证，因此它不是可用的驱动发行版。下方已验证环境和测速数据来自原 MT7922 开发版本，不代表 MT7925 适配结果。源码包不含驱动二进制、测试证书或固件镜像。
+
 LuoboDrop 是一个 Windows 11 实验项目。它用自研 WiFiCx 驱动让一张 MediaTek MT7922 网卡同时维持普通 Wi‑Fi 和 Apple Wireless Direct Link（AWDL），实现 Windows 与 iPad 原生隔空投送双向收发，并提供 Windows 桌面小窗口。
 
 ## 社区源码预览

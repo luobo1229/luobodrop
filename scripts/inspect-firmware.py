@@ -1,4 +1,4 @@
-"""Inspect the backed-up MT7922 Connac2 firmware without accessing hardware."""
+"""Inspect backed-up MT7922 or MT7925 Connac2 firmware without hardware access."""
 
 import argparse
 import hashlib
@@ -13,8 +13,10 @@ PATCH_HEADER = Struct(">16s4sI4xHH12xI48x")
 PATCH_REGION = Struct(">7I36x")
 RAM_TRAILER = Struct("<5B2x10s15sI")
 RAM_REGION = Struct("<16x2I2B14x")
-ROM_NAME = "WIFI_MT7922_patch_mcu_1_1_hdr.bin"
-RAM_NAME = "WIFI_RAM_CODE_MT7922_1.bin"
+FIRMWARE_NAMES = {
+    "mt7922": ("WIFI_MT7922_patch_mcu_1_1_hdr.bin", "WIFI_RAM_CODE_MT7922_1.bin"),
+    "mt7925": ("WIFI_MT7925_PATCH_MCU_1_1_hdr.bin", "WIFI_RAM_CODE_MT7925_1_1.bin"),
+}
 
 # mt7921.h CLC container and mt7921_clc_rule, little endian.
 FW_TYPE_CLC = 2
@@ -137,6 +139,7 @@ def read_firmware(backup, name):
 def main():
     project = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--chip", choices=FIRMWARE_NAMES, default="mt7922")
     parser.add_argument(
         "backup", type=Path, nargs="?", default=project / "backup" / "mediatek-3.5.2.1376"
     )
@@ -144,8 +147,9 @@ def main():
     parser.add_argument("--pack-clc", type=Path, help="Save the firmware CLC region for SET_CLC")
     args = parser.parse_args()
     try:
-        rom = read_firmware(args.backup, ROM_NAME)
-        ram = read_firmware(args.backup, RAM_NAME)
+        rom_name, ram_name = FIRMWARE_NAMES[args.chip]
+        rom = read_firmware(args.backup, rom_name)
+        ram = read_firmware(args.backup, ram_name)
         rom_info = inspect_rom(rom)
         ram_info = inspect_ram(ram)
         describe_scatter(rom, rom_info["regions"], PCI_DMA_PAGE_BYTES,

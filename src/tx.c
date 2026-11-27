@@ -30,6 +30,20 @@
 #define TX_RELEASE_PACKET_TYPE 6U
 #define TX_RELEASE_HEADER_BYTES 8U
 #define TX_RELEASE_PAIR (1U << 31)
+#define MT7925_TXD_BYTES 32U
+#define MT7925_TXD1_FIXED_RATE (1U << 31)
+#define MT7925_TXD1_OWN_MAC_SHIFT 25U
+#define MT7925_TXD1_TID_SHIFT 21U
+#define MT7925_TXD1_HDR_INFO_SHIFT 16U
+#define MT7925_TXD1_HDR_FORMAT_80211 (2U << 14)
+#define MT7925_TXD2_HTC_VALID (1U << 13)
+#define MT7925_TXD3_SN_VALID (1U << 31)
+#define MT7925_TXD3_BA_DISABLE (1U << 28)
+#define MT7925_TXD3_BCM (1U << 4)
+#define MT7925_TXD6_DAS (1U << 2)
+#define MT7925_TXD6_MSDU_COUNT_ONE (1U << 4)
+#define MT7925_TXD6_RATE_SHIFT 16U
+#define MT7925_BASIC_RATES_TABLE 14U
 
 static uint16_t ReadLe16(const uint8_t *Data)
 {
@@ -54,9 +68,101 @@ static void WriteLe32(uint8_t *Data, uint32_t Value)
     WriteLe16(Data + 2, (uint16_t)(Value >> 16));
 }
 
+static int Mt7925RateTableIndex(uint16_t RateCode)
+{
+    /* mt76's legacy rate array has CCK 1/2/5.5/11 first, then OFDM. */
+    switch (RateCode) {
+    case MT7922_OFDM_6_MBPS:  return (int)(MT7925_BASIC_RATES_TABLE + 4U);
+    case MT7922_OFDM_12_MBPS: return (int)(MT7925_BASIC_RATES_TABLE + 6U);
+    case MT7922_OFDM_24_MBPS: return (int)(MT7925_BASIC_RATES_TABLE + 8U);
+    case MT7922_OFDM_54_MBPS: return (int)(MT7925_BASIC_RATES_TABLE + 11U);
+    default: return -1;
+    }
+}
+
+static int BuildConnac3RawTxwi(uint8_t *Txwi, const MT7922_AWDL_TX *Request,
+    const uint8_t *Frame, size_t FrameBytes, uint32_t HeaderWords, uint32_t Tid, int Protect)
+{
+    if (FrameBytes < 26 || FrameBytes > AWDL_TX_AMSDU3_FRAME_BYTES || Request->FrameAddress == 0
+        || (FrameBytes > TXP_LENGTH_MASK && (!Request->Ampdu || (Frame[24] & 0x80U) == 0))
+        || Request->FrameAddress > UINT32_MAX - (FrameBytes - 1)
+        || Request->Wcid > 0xfffU || Request->Token >= TXP_TOKEN_VALID
+        || Request->PacketId < TX_REPORT_FIRST_PID || Request->OwnMacIndex > 0x3fU
+        || (Request->Queue > 3 && Request->Queue != MT7922_TX_QUEUE_ALTX0) || Request->SpeIndex > 31U
+        || (Request->Ampdu && ((Frame[4] & 1U) != 0 || Frame[0] != 0x88 ||
+            Request->RateCode != 0 || Request->Wcid == 0))) {
+        return 0;
+    }
+
+    const uint16_t fc = ReadLe16(Frame);
+    const uint32_t frameType = (fc >> 2) & 3U;
+    const uint32_t frameSubtype = (fc >> 4) & 15U;
+    const uint32_t sequence = (uint32_t)(ReadLe16(Frame + 22) >> 4);
+    const int multicast = (Frame[4] & 1U) != 0;
+    const int rateIndex = Request->Ampdu ? -1 : Mt7925RateTableIndex(Request->RateCode);
+    if (!Request->Ampdu && rateIndex < 0) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < MT7922_TXWI_BYTES; ++i) {
+        Txwi[i] = 0;
+    }
+
+    /* Connac3 TXD0 keeps the CT packet format at zero. Management frames use
+       the firmware's ALTX0 scheduler queue; data retains its requested AC. */
+    const uint32_t queue = frameType == 0 ? MT7922_TX_QUEUE_ALTX0 : Request->Queue;
+    WriteLe32(Txwi, (uint32_t)(FrameBytes + MT7925_TXD_BYTES) | queue << 25);
+
+    uint32_t txd1 = MT7925_TXD1_HDR_FORMAT_80211 |
+        HeaderWords << MT7925_TXD1_HDR_INFO_SHIFT |
+        Tid << MT7925_TXD1_TID_SHIFT |
+        (uint32_t)Request->OwnMacIndex << MT7925_TXD1_OWN_MAC_SHIFT |
+        Request->Wcid;
+    if (!Request->Ampdu) {
+        txd1 |= MT7925_TXD1_FIXED_RATE;
+    }
+    WriteLe32(Txwi + 4, txd1);
+
+    const uint32_t htc = (fc & 0x8000U) != 0 ? MT7925_TXD2_HTC_VALID : 0;
+    WriteLe32(Txwi + 8, htc | frameType << 4 | frameSubtype);
+
+    const uint32_t txd3 = MT7925_TXD3_SN_VALID |
+        (Request->Ampdu ? 0 : MT7925_TXD3_BA_DISABLE) | sequence << 16 |
+        15U << 11 | (multicast ? TXD_NO_ACK | MT7925_TXD3_BCM : 0) |
+        (Protect ? TXD_PROTECT_FRAME : 0);
+    WriteLe32(Txwi + 12, txd3);
+    WriteLe32(Txwi + 20, TXD_STATUS_TO_HOST | Request->PacketId);
+    if (!Request->Ampdu) {
+        WriteLe32(Txwi + 24, MT7925_TXD6_DAS | MT7925_TXD6_MSDU_COUNT_ONE |
+            (uint32_t)rateIndex << MT7925_TXD6_RATE_SHIFT);
+    } else {
+        WriteLe32(Txwi + 24, MT7925_TXD6_DAS | MT7925_TXD6_MSDU_COUNT_ONE);
+    }
+
+    /* Connac3 uses the same 32-byte hardware TXP layout and LAST bit as
+       Connac2. MT7925 PCIe DMA is constrained to 32-bit addresses. */
+    WriteLe16(Txwi + TXD_BYTES, (uint16_t)(TXP_TOKEN_VALID | Request->Token));
+    WriteLe32(Txwi + TXP_BUFFER0, Request->FrameAddress);
+    if (FrameBytes <= TXP_LENGTH_MASK) {
+        WriteLe16(Txwi + TXP_LENGTH0, (uint16_t)(TXP_BUFFER_LAST | FrameBytes));
+    } else {
+        WriteLe16(Txwi + TXP_LENGTH0, TXP_FIRST_SEGMENT_BYTES);
+        WriteLe16(Txwi + TXP_LENGTH1,
+            (uint16_t)(TXP_BUFFER_LAST | (FrameBytes - TXP_FIRST_SEGMENT_BYTES)));
+        WriteLe32(Txwi + TXP_BUFFER1, Request->FrameAddress + TXP_FIRST_SEGMENT_BYTES);
+    }
+    return 1;
+}
+
 static int BuildRawTxwi(uint8_t *Txwi, const MT7922_AWDL_TX *Request,
     const uint8_t *Frame, size_t FrameBytes, uint32_t HeaderWords, uint32_t Tid, int Protect)
 {
+    if (Request->ChipId == 0x7925) {
+        return BuildConnac3RawTxwi(Txwi, Request, Frame, FrameBytes, HeaderWords, Tid, Protect);
+    }
+    if (Request->ChipId != 0 && Request->ChipId != 0x7922) {
+        return 0;
+    }
     if (FrameBytes < 26 || FrameBytes > AWDL_TX_AMSDU3_FRAME_BYTES || Request->FrameAddress == 0
         || (FrameBytes > TXP_LENGTH_MASK && (!Request->Ampdu || (Frame[24] & 0x80U) == 0))
         || Request->FrameAddress > UINT32_MAX - (FrameBytes - 1)
@@ -257,6 +363,117 @@ MT7922_TX_REPORT_RESULT Mt7922ReadTxRelease(const uint8_t *Data, size_t Length,
     }
     *Release = decoded;
     return Mt7922TxReportMatched;
+}
+
+static MT7922_TX_REPORT_RESULT Mt7925ReadTxReport(const uint8_t *Data, size_t Length,
+    const MT7922_AWDL_TX *Request, MT7922_TX_REPORT *Report)
+{
+    if (Length < sizeof(uint32_t)) {
+        return Mt7922TxReportMalformed;
+    }
+    const uint32_t header = ReadLe32(Data);
+    if ((header >> 27) != TX_REPORT_PACKET_TYPE) {
+        return Mt7922TxReportUnmatched;
+    }
+    if (Length < TX_REPORT_HEADER_BYTES + TX_REPORT_ENTRY_BYTES ||
+        (Length - TX_REPORT_HEADER_BYTES) % TX_REPORT_ENTRY_BYTES != 0) {
+        return Mt7922TxReportMalformed;
+    }
+
+    for (size_t offset = TX_REPORT_HEADER_BYTES; offset < Length; offset += TX_REPORT_ENTRY_BYTES) {
+        const uint8_t *entry = Data + offset;
+        const uint32_t word0 = ReadLe32(entry);
+        const uint32_t format = (word0 >> 23) & 3U;
+        const uint32_t wcid = (ReadLe32(entry + 8) >> 16) & 0xfffU;
+        const uint32_t packetId = ReadLe32(entry + 12) >> 24;
+        if (format > 1U || packetId != Request->PacketId || wcid != Request->Wcid) {
+            continue;
+        }
+        Report->RateCode = (uint16_t)(word0 & TX_REPORT_RATE_MASK);
+        Report->Sequence = (uint16_t)((ReadLe32(entry + 4) >> 20) & 0xfffU);
+        Report->AckErrors = (uint8_t)((word0 >> 16) & 7U);
+        Report->Ampdu = (uint8_t)((word0 >> 25) & 1U);
+        Report->Bandwidth = (uint8_t)((word0 >> 29) & 7U);
+        return Mt7922TxReportMatched;
+    }
+    return Mt7922TxReportUnmatched;
+}
+
+static MT7922_TX_REPORT_RESULT Mt7925ReadTxRelease(const uint8_t *Data, size_t Length,
+    uint16_t Token, MT7922_TX_RELEASE *Release)
+{
+    const uint32_t txFreePair = 1U << 31;
+    const uint32_t txFreeHeader = 1U << 30;
+    if (Length < TX_RELEASE_HEADER_BYTES || (Length - TX_RELEASE_HEADER_BYTES) % 4U != 0) {
+        return Mt7922TxReportMalformed;
+    }
+    const uint32_t word0 = ReadLe32(Data);
+    if ((word0 >> 27) != TX_RELEASE_PACKET_TYPE) {
+        return Mt7922TxReportUnmatched;
+    }
+    const uint32_t version = (ReadLe32(Data + 4) >> 16) & 0xfU;
+    if (version < 4U) {
+        return Mt7922TxReportMalformed;
+    }
+
+    uint32_t remaining = (word0 >> 16) & 0x3ffU;
+    uint16_t attempts = 0;
+    uint8_t status = 0;
+    int found = 0;
+    for (size_t offset = TX_RELEASE_HEADER_BYTES; remaining != 0 && offset < Length; offset += 4) {
+        const uint32_t info = ReadLe32(Data + offset);
+        if (info & txFreePair) {
+            continue;
+        }
+        if (info & txFreeHeader) {
+            attempts = (uint16_t)((info >> 24) & 0xfU);
+            status = (uint8_t)((info >> 28) & 3U);
+            continue;
+        }
+        const uint16_t ids[2] = {
+            (uint16_t)(info & 0x7fffU),
+            (uint16_t)((info >> 15) & 0x7fffU)
+        };
+        for (unsigned i = 0; i < 2; ++i) {
+            if (ids[i] == 0x7fffU) {
+                continue;
+            }
+            if (remaining == 0) {
+                return Mt7922TxReportMalformed;
+            }
+            --remaining;
+            if (ids[i] == Token) {
+                if (found) {
+                    return Mt7922TxReportMalformed;
+                }
+                Release->Attempts = attempts;
+                Release->Status = status;
+                found = 1;
+            }
+        }
+    }
+    if (remaining != 0) {
+        return Mt7922TxReportMalformed;
+    }
+    return found ? Mt7922TxReportMatched : Mt7922TxReportUnmatched;
+}
+
+MT7922_TX_REPORT_RESULT Mt792xReadTxReport(uint16_t ChipId, const uint8_t *Data,
+    size_t Length, const MT7922_AWDL_TX *Request, MT7922_TX_REPORT *Report)
+{
+    if (ChipId == 0x7925) {
+        return Mt7925ReadTxReport(Data, Length, Request, Report);
+    }
+    return Mt7922ReadTxReport(Data, Length, Request, Report);
+}
+
+MT7922_TX_REPORT_RESULT Mt792xReadTxRelease(uint16_t ChipId, const uint8_t *Data,
+    size_t Length, uint16_t Token, MT7922_TX_RELEASE *Release)
+{
+    if (ChipId == 0x7925) {
+        return Mt7925ReadTxRelease(Data, Length, Token, Release);
+    }
+    return Mt7922ReadTxRelease(Data, Length, Token, Release);
 }
 
 static size_t BuildActionFrame(uint8_t *Frame, size_t Capacity, const uint8_t *Dest,

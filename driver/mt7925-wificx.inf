@@ -1,0 +1,85 @@
+; Experimental WiFiCx station driver matched only to the backed-up MT7925 PCI ID.
+; Keep the vendor driver package intact so Device Manager can restore it.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = NET
+ClassGuid   = {4d36e972-e325-11ce-bfc1-08002be10318}
+Provider    = %ProviderName%
+CatalogFile = mt7925-wificx.cat
+DriverVer   = 11/27/2026,0.70.0.85
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+mt7925-wificx.sys = 1,,
+mt7925-wificx-fw.bin = 1,,
+
+[Manufacturer]
+%ManufacturerName% = Models,NTamd64.10.0...22000
+
+[Models.NTamd64.10.0...22000]
+%DeviceDesc% = Mt7925Wifi_Device.ndi, PCI\VEN_14C3&DEV_7925&SUBSYS_60001A3B&REV_00
+
+[Mt7925Wifi_Device.ndi.NT]
+CopyFiles = Mt7925Wifi_Copy
+Characteristics = 0x84
+BusType = 0
+AddReg = Mt7925Wifi_Ndi, netvadapter.params
+*IfType = 71
+*MediaType = 16
+*PhysicalMediaType = 9
+
+[Mt7925Wifi_Copy]
+mt7925-wificx.sys
+mt7925-wificx-fw.bin
+
+[Mt7925Wifi_Device.ndi.NT.Services]
+AddService = mt7922wificx,%SPSVCINST_ASSOCSERVICE%, Mt7925Wifi_Service_Inst
+
+[Mt7925Wifi_Service_Inst]
+DisplayName    = %ServiceDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\mt7925-wificx.sys
+
+[Mt7925Wifi_Device.ndi.NT.Wdf]
+KmdfService = mt7922wificx, Mt7925Wifi_Wdf
+
+[Mt7925Wifi_Wdf]
+KmdfLibraryVersion = 1.33
+
+[Mt7925Wifi_Ndi]
+HKR, Ndi, Service, 0, "mt7922wificx"
+HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
+HKR, Ndi\Interfaces, LowerRange, 0, "wlan,ethernet"
+HKR, NetworkInterface, *IfConnectorPresent, 0x00010001, 1
+HKR, NetworkInterface, *ConnectionType, 0x00010001, 1
+HKR, NetworkInterface, *DirectionType, 0x00010001, 0
+HKR, NetworkInterface, *AccessType, 0x00010001, 2
+HKR, NetworkInterface, *HardwareLoopback, 0x00010001, 0
+HKR, , NumberOfNetworkInterfaces, 0x00010001, 11
+; Conservative CN 5 GHz station profile, calibrated by firmware/eFuse.
+HKR, , StationRadioProfile, 0x00000001, 0x43,0x4e,0x09,0x24,0x28,0x28,0x28,0x2c,0x28,0x30,0x28,0x95,0x28,0x99,0x28,0x9d,0x28,0xa1,0x28,0xa5,0x28
+
+[netvadapter.params]
+HKR, Ndi\params\MACLastByte, ParamDesc, 0, "MACLastByte"
+HKR, Ndi\params\MACLastByte, default, 0, "1"
+HKR, Ndi\params\MACLastByte, type, 0, "int"
+HKR, Ndi\params\MACLastByte, min, 0, "1"
+HKR, Ndi\params\MACLastByte, max, 0, "254"
+HKR, Ndi\params\MACLastByte, step, 0, "1"
+HKR, Ndi\params\MACLastByte, Optional, 0, "0"
+
+[Strings]
+ProviderName = "MT7925 AirDrop (Experimental)"
+ManufacturerName = "MT7925 AirDrop (Experimental)"
+DeviceDesc = "MT7925 Wi-Fi 7 WiFiCx Test Driver"
+ServiceDesc = "MT7925 WiFiCx Test Driver"
+DiskName = "MT7925 WiFiCx Test Installation Disk"
+SPSVCINST_ASSOCSERVICE = 0x00000002

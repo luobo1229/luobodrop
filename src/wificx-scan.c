@@ -183,7 +183,8 @@ void Mt7922ExpireWdiScan(MT7922_WDI_SCAN *State)
 bool Mt7922WdiScanEvent(MT7922_WDI_SCAN *State, const uint8_t *Record, size_t Bytes)
 {
     if ((!State->Active && !State->Cancelling) ||
-        !Mt7922MatchScanRecord(Record, Bytes, State->Sequence, State->BandIndex)) {
+        !Mt792xMatchScanRecord(State->ChipId, Record, Bytes,
+            State->Sequence, State->BandIndex)) {
         return false;
     }
     const bool cancelled = State->Cancelling;
@@ -198,7 +199,7 @@ bool Mt7922WdiScanFrame(MT7922_WDI_SCAN *State, const uint8_t *Record, size_t By
     const size_t fixedBytes = 12;
     MT7922_RX_FRAME frame;
     if (!State->Active || State->Cancelling || Record == NULL ||
-        Mt7922DecodeRx(Record, Bytes, &frame) != Mt7922RxRawFrame ||
+        Mt792xDecodeRx(State->ChipId, Record, Bytes, &frame) != Mt7922RxRawFrame ||
         frame.Length < headerBytes + fixedBytes || frame.Channel == 0 || !frame.RssiPresent ||
         frame.AmsduPart != 0) {
         return false;
@@ -890,10 +891,10 @@ int32_t Mt7922MakeWdiConnectPlan(const WDI_TASK_CONNECT_PARAMETERS *Parameters,
     return STATUS_NOT_FOUND;
 }
 
-_Static_assert((int)Mt7922PrivacyRequireKey == (int)WDI_EXEMPT_NO_EXEMPTION &&
-    (int)Mt7922PrivacyAlwaysClear == (int)WDI_EXEMPT_ALWAYS &&
-    (int)Mt7922PrivacyClearUntilKey == (int)WDI_EXEMPT_ON_KEY_MAPPING_KEY_UNAVAILABLE,
-    "WDI privacy action values");
+_Static_assert(Mt7922PrivacyRequireKey == 0 && Mt7922PrivacyAlwaysClear == 1 &&
+    Mt7922PrivacyClearUntilKey == 2, "internal privacy action values");
+_Static_assert(WDI_EXEMPT_NO_EXEMPTION == 0 && WDI_EXEMPT_ALWAYS == 1 &&
+    WDI_EXEMPT_ON_KEY_MAPPING_KEY_UNAVAILABLE == 2, "WDI privacy action values");
 
 int32_t Mt7922ReadWdiEapolPrivacy(const WDI_SET_PRIVACY_EXEMPTION_LIST_PARAMETERS *Parameters,
     MT7922_PRIVACY *Privacy)

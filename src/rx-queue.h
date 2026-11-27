@@ -26,6 +26,7 @@ typedef struct _MT7922_RX_RING {
     ULONG Count;
     ULONG Consumer;
     ULONG Producer;
+    USHORT ChipId;
     BOOLEAN DiscardContinuation;
 } MT7922_RX_RING;
 

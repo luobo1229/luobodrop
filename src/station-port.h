@@ -39,6 +39,12 @@ bool Mt7922BuildStationAp(const MT7922_STATION_AP *Ap, uint8_t Port, uint16_t Mu
 #define MT7922_STATION_POWER_BATCH 8U
 #define MT7922_STATION_POWER_BYTES (MT7922_STATION_POWER_HEADER + MT7922_STATION_POWER_ENTRY * MT7922_STATION_POWER_BATCH)
 #define MT7922_STATION_CHANNEL_BYTES 76U
+#define MT7925_STATION_DOMAIN_HEADER 16U
+#define MT7925_STATION_DOMAIN_ENTRY 8U
+#define MT7925_STATION_POWER_HEADER 52U
+#define MT7925_STATION_POWER_ENTRY 450U
+#define MT7925_STATION_POWER_BATCH 3U
+#define MT7925_STATION_POWER_BYTES (MT7925_STATION_POWER_HEADER + MT7925_STATION_POWER_ENTRY * MT7925_STATION_POWER_BATCH)
 
 typedef struct {
     uint8_t Number;
@@ -55,6 +61,8 @@ bool Mt7922ValidateStationRadio(const MT7922_STATION_RADIO_PROFILE *Profile);
 bool Mt7922StationRadioAllows(const MT7922_STATION_RADIO_PROFILE *Profile, uint8_t Channel);
 bool Mt7922StationRadioAllows80(const MT7922_STATION_RADIO_PROFILE *Profile);
 size_t Mt7922BuildStationDomain(uint8_t *Command, const MT7922_STATION_RADIO_PROFILE *Profile);
+size_t Mt7925BuildStationDomain(uint8_t *Command, const MT7922_STATION_RADIO_PROFILE *Profile);
+size_t Mt7925BuildStationPower(uint8_t *Command, const MT7922_STATION_RADIO_PROFILE *Profile, size_t First);
 size_t Mt7922BuildStationPower(uint8_t *Command, const MT7922_STATION_RADIO_PROFILE *Profile, size_t First);
 void Mt7922BuildStationChannel(uint8_t Command[MT7922_STATION_CHANNEL_BYTES], uint8_t Channel,
     uint8_t Center80, uint8_t Chains, bool ReceivePath);

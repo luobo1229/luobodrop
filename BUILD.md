@@ -25,6 +25,18 @@ python -B -m unittest discover -s tools/winawdl/airdrop/tests -p 'test_*.py'
 
 The driver build creates an unsigned SYS in `build/wificx-x64/`. Firmware and certificates are unnecessary for compilation. The standalone ring tests run without Wi-Fi hardware or firmware. The query executable and TCP merger DLL go under `build/x64/`. The older native diagnostic switches depend on private reference inputs and are outside this candidate's supported build.
 
+### Experimental MT7925 station build
+
+The MT7925 WiFiCx package matches only `PCI\VEN_14C3&DEV_7925&SUBSYS_60001A3B&REV_00`. It uses the two MT7925 firmware files extracted from the backed-up vendor package; `prepare-firmware.ps1` verifies their pinned SHA-256 values before packaging. The current port exposes a restricted CN 5 GHz channel profile. Scanning uses the Connac3 Unified MCU TLVs and completion event. It does not expose 2.4 GHz or 6 GHz, and the extracted firmware has no separate CLC regulatory region.
+
+```powershell
+.\scripts\prepare-firmware.ps1 -Chip MT7925 -FirmwareDirectory 'D:\dev-deps\mt7925'
+.\scripts\build.ps1 -WifiCx -WdkRoot 'D:\dev-deps\wdk\c'
+.\scripts\package-test.ps1 -WifiCx -Chip MT7925 -WdkRoot 'D:\dev-deps\wdk\c'
+```
+
+Use this profile only in the configured CN region until a region-matched regulatory data path is available. Keep the vendor driver package exported and recoverable as described below.
+
 ## Local runtime and pack inputs
 
 1. Obtain [Wintun 0.14.1](https://www.wintun.net/) separately. Verify the ZIP SHA-256 `07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51` and place its AMD64 DLL under `tools/wintun/bin/amd64/`.

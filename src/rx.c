@@ -179,6 +179,148 @@ MT7922_RX_STATUS Mt7922DecodeRx(const uint8_t *Buffer, size_t DmaBytes,
     return Mt7922RxRawFrame;
 }
 
+MT7922_RX_STATUS Mt7925DecodeRx(const uint8_t *Buffer, size_t DmaBytes,
+    MT7922_RX_FRAME *Frame)
+{
+    const size_t MT7925_RXD_BASE_BYTES = 32;
+    const uint32_t MT7925_RXD_PACKET_NORMAL = 2;
+    const uint32_t MT7925_RXD_PACKET_EVENT = 7;
+    const uint32_t MT7925_RXD_PACKET_NORMAL_MCU = 8;
+    const uint32_t MT7925_RXD1_GROUP_1 = 1U << 16;
+    const uint32_t MT7925_RXD1_GROUP_2 = 1U << 17;
+    const uint32_t MT7925_RXD1_GROUP_3 = 1U << 18;
+    const uint32_t MT7925_RXD1_GROUP_4 = 1U << 19;
+    const uint32_t MT7925_RXD1_GROUP_5 = 1U << 20;
+    const uint32_t MT7925_RXD1_ICV_ERROR = 1U << 25;
+    const uint32_t MT7925_RXD1_TKIP_MIC_ERROR = 1U << 26;
+    const uint32_t MT7925_RXD1_CIPHER_MISMATCH = 1U << 23;
+    const uint32_t MT7925_RXD1_CIPHER_LENGTH_MISMATCH = 1U << 24;
+    const uint32_t MT7925_RXD1_SECURITY_DONE = 1U << 31;
+    const uint32_t MT7925_RXD2_TRANSLATED = 1U << 7;
+    const uint32_t MT7925_RXD2_FRAGMENT = 1U << 27;
+    const uint32_t MT7925_RXD2_AMSDU_ERROR = 1U << 23;
+    const uint32_t MT7925_RXD2_MAX_LENGTH_ERROR = 1U << 24;
+    const uint32_t MT7925_RXD2_TRANSLATION_ERROR = 1U << 25;
+    const uint32_t MT7925_RXD2_NON_AMPDU = 1U << 30;
+    const uint32_t MT7925_RXD3_FCS_ERROR = 1U << 24;
+    const uint32_t MT7925_RXD_CIPHER_CCMP = 4;
+    uint32_t word0, word1, word2, word3, word4;
+    size_t recordBytes, offset, group1, group2, group3;
+
+    *Frame = (MT7922_RX_FRAME){0};
+    if (DmaBytes < sizeof(uint32_t)) {
+        Frame->SkipFlags |= MT7922_RX_SKIP_LENGTH;
+        return Mt7922RxMalformed;
+    }
+    word0 = ReadLe32(Buffer);
+    recordBytes = word0 & 0xffffU;
+    if (recordBytes < sizeof(uint32_t) || recordBytes > DmaBytes) {
+        Frame->SkipFlags |= MT7922_RX_SKIP_LENGTH;
+        return Mt7922RxMalformed;
+    }
+    const uint32_t type = word0 >> 27;
+    const uint32_t packetFlags = (word0 >> 16) & 0xfU;
+    if (type != MT7925_RXD_PACKET_NORMAL && type != MT7925_RXD_PACKET_NORMAL_MCU &&
+        !(type == MT7925_RXD_PACKET_EVENT && packetFlags == 1U)) {
+        return Mt7922RxIgnored;
+    }
+    if (recordBytes < MT7925_RXD_BASE_BYTES) {
+        Frame->SkipFlags |= MT7922_RX_SKIP_LENGTH;
+        return Mt7922RxMalformed;
+    }
+
+    word1 = ReadLe32(Buffer + 4);
+    word2 = ReadLe32(Buffer + 8);
+    word3 = ReadLe32(Buffer + 12);
+    word4 = ReadLe32(Buffer + 16);
+    if (word3 & MT7925_RXD3_FCS_ERROR) Frame->SkipFlags |= MT7922_RX_SKIP_FCS;
+    if (word2 & MT7925_RXD2_TRANSLATED) Frame->SkipFlags |= MT7922_RX_SKIP_TRANSLATED;
+    if (word2 & MT7925_RXD2_AMSDU_ERROR) Frame->SkipFlags |= MT7922_RX_SKIP_AMSDU;
+    if (word2 & MT7925_RXD2_MAX_LENGTH_ERROR) Frame->SkipFlags |= MT7922_RX_SKIP_LENGTH;
+    Frame->HeaderTranslationError = (word2 & MT7925_RXD2_TRANSLATION_ERROR) != 0;
+    if ((word3 & MT7925_RXD3_FCS_ERROR) || (word1 & (MT7925_RXD1_ICV_ERROR | MT7925_RXD1_TKIP_MIC_ERROR)) ||
+        (word2 & (MT7925_RXD2_TRANSLATED | MT7925_RXD2_AMSDU_ERROR | MT7925_RXD2_MAX_LENGTH_ERROR))) {
+        return Mt7922RxIgnored;
+    }
+
+    if ((word1 & MT7925_RXD1_GROUP_5) && !(word1 & MT7925_RXD1_GROUP_3)) {
+        Frame->SkipFlags |= MT7922_RX_SKIP_GROUPS;
+        return Mt7922RxMalformed;
+    }
+    offset = MT7925_RXD_BASE_BYTES;
+    if (word1 & MT7925_RXD1_GROUP_4) offset += 16;
+    group1 = offset;
+    if (word1 & MT7925_RXD1_GROUP_1) offset += 16;
+    group2 = offset;
+    if (word1 & MT7925_RXD1_GROUP_2) offset += 16;
+    group3 = offset;
+    if (word1 & MT7925_RXD1_GROUP_3) {
+        offset += 16;
+        if (word1 & MT7925_RXD1_GROUP_5) offset += 24U * sizeof(uint32_t);
+    }
+    offset += 2U * ((word2 >> 13) & 7U);
+    if (offset + 2U > recordBytes) {
+        Frame->SkipFlags |= MT7922_RX_SKIP_LENGTH;
+        return Mt7922RxMalformed;
+    }
+
+    Frame->ReceiveWcid = (uint16_t)(word1 & 0xfffU);
+    Frame->ReceiveKeyId = (uint8_t)((word1 >> 21) & 3U);
+    if ((word1 & (MT7925_RXD1_GROUP_1 | MT7925_RXD1_SECURITY_DONE)) ==
+            (MT7925_RXD1_GROUP_1 | MT7925_RXD1_SECURITY_DONE) &&
+        ((word2 >> 16) & 0x1fU) == MT7925_RXD_CIPHER_CCMP &&
+        (word1 & (MT7925_RXD1_CIPHER_MISMATCH | MT7925_RXD1_CIPHER_LENGTH_MISMATCH)) == 0 &&
+        (word2 & MT7925_RXD2_FRAGMENT) == 0 && (word4 & 3U) == 0) {
+        for (unsigned i = 0; i < 6; ++i) {
+            Frame->CcmpPacketNumber |= (uint64_t)Buffer[group1 + i] << (8U * i);
+        }
+        Frame->CcmpDecrypted = 1;
+    }
+
+    const uint8_t channel = Buffer[13];
+    Frame->Band = channel > 180 ? 3 : channel > 14 ? 2 : 1;
+    Frame->Channel = channel > 180 ? (uint8_t)((channel - 181) * 4 + 1) : channel;
+    if (word1 & MT7925_RXD1_GROUP_3) {
+        const uint32_t rxv0 = ReadLe32(Buffer + group3);
+        const uint32_t rxv2 = ReadLe32(Buffer + group3 + 8);
+        const uint8_t *rcpi = Buffer + group3 + 12;
+        for (unsigned chain = 0; chain < 4; ++chain) {
+            if (rcpi[chain] != 0 && rcpi[chain] <= 220) {
+                const int8_t dbm = (int8_t)((int)rcpi[chain] / 2 - 110);
+                if (!Frame->RssiPresent || dbm > Frame->RssiDbm) {
+                    Frame->RssiDbm = dbm;
+                    Frame->RssiPresent = 1;
+                }
+            }
+        }
+        Frame->PhyPresent = 1;
+        Frame->PhyMode = (uint8_t)((rxv2 >> 11) & 0xfU);
+        Frame->PhyWidth = (uint8_t)(rxv2 & 7U);
+        Frame->PhyMcs = (uint8_t)(rxv0 & 0x7fU);
+    }
+    if ((word1 & MT7925_RXD1_GROUP_2) && !(word2 & MT7925_RXD2_NON_AMPDU)) {
+        Frame->Ampdu = 1;
+        Frame->AmpduTimestamp = ReadLe32(Buffer + group2);
+    }
+    Frame->AmsduPart = (uint8_t)(word4 & 3U);
+    Frame->Bytes = Buffer + offset;
+    Frame->Length = recordBytes - offset;
+    return Mt7922RxRawFrame;
+}
+
+MT7922_RX_STATUS Mt792xDecodeRx(uint16_t ChipId, const uint8_t *Buffer,
+    size_t DmaBytes, MT7922_RX_FRAME *Frame)
+{
+    if (ChipId == 0 || ChipId == 0x7922) {
+        return Mt7922DecodeRx(Buffer, DmaBytes, Frame);
+    }
+    if (ChipId == 0x7925) {
+        return Mt7925DecodeRx(Buffer, DmaBytes, Frame);
+    }
+    Frame->SkipFlags = MT7922_RX_SKIP_LENGTH;
+    return Mt7922RxMalformed;
+}
+
 static int DecodeChannelSequence(const uint8_t *Value, size_t Length,
     AWDL_CHANNEL_SEQUENCE *Sequence)
 {
